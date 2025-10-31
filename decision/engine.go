@@ -7,6 +7,8 @@ import (
 	"nofx/market"
 	"nofx/mcp"
 	"nofx/pool"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -199,8 +201,43 @@ func calculateMaxCandidates(ctx *Context) int {
 	return len(ctx.CandidateCoins)
 }
 
-// buildSystemPrompt 构建 System Prompt（固定规则，可缓存）
+// buildSystemPrompt 构建 System Prompt（从模板读取，失败时回退）
 func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage int) string {
+	promptPath := filepath.Join("prompts", "system_prompt.txt")
+	templateBytes, err := os.ReadFile(promptPath)
+	if err != nil {
+		log.Printf("⚠️  无法读取系统提示词文件 %s: %v，使用内置提示词", promptPath, err)
+		return buildDefaultSystemPrompt(accountEquity, btcEthLeverage, altcoinLeverage)
+	}
+
+	template := string(templateBytes)
+
+	altcoinMin := accountEquity * 0.8
+	altcoinMax := accountEquity * 1.5
+	btcethMin := accountEquity * 5
+	btcethMax := accountEquity * 10
+	exampleSize := accountEquity * 5
+
+	replacements := map[string]string{
+		"{ALTCOIN_MIN}":      fmt.Sprintf("%.0f", altcoinMin),
+		"{ALTCOIN_MAX}":      fmt.Sprintf("%.0f", altcoinMax),
+		"{BTCETH_MIN}":       fmt.Sprintf("%.0f", btcethMin),
+		"{BTCETH_MAX}":       fmt.Sprintf("%.0f", btcethMax),
+		"{ALTCOIN_LEVERAGE}": fmt.Sprintf("%d", altcoinLeverage),
+		"{BTCETH_LEVERAGE}":  fmt.Sprintf("%d", btcEthLeverage),
+		"{EXAMPLE_SIZE}":     fmt.Sprintf("%.0f", exampleSize),
+	}
+
+	result := template
+	for placeholder, value := range replacements {
+		result = strings.ReplaceAll(result, placeholder, value)
+	}
+
+	return result
+}
+
+// buildDefaultSystemPrompt 构建默认的系统提示词（当模板文件缺失时使用）
+func buildDefaultSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage int) string {
 	var sb strings.Builder
 
 	// === 核心使命 ===
@@ -325,9 +362,33 @@ func buildUserPrompt(ctx *Context) string {
 
 	// BTC 市场
 	if btcData, hasBTC := ctx.MarketDataMap["BTCUSDT"]; hasBTC {
-		sb.WriteString(fmt.Sprintf("**BTC**: %.2f (1h: %+.2f%%, 4h: %+.2f%%) | MACD: %.4f | RSI: %.2f\n\n",
-			btcData.CurrentPrice, btcData.PriceChange1h, btcData.PriceChange4h,
-			btcData.CurrentMACD, btcData.CurrentRSI7))
+		btcSummary := fmt.Sprintf("**BTC**: %.2f (15m: %+.2f%% | 1h: %+.2f%% | 4h: %+.2f%%)",
+			btcData.CurrentPrice, btcData.PriceChange15m, btcData.PriceChange1h, btcData.PriceChange4h)
+
+		details := make([]string, 0, 4)
+		if btcData.HourlyContext != nil {
+			if len(btcData.HourlyContext.RSI14Series) > 0 {
+				details = append(details, fmt.Sprintf("1h RSI14 %.2f", btcData.HourlyContext.RSI14))
+			}
+			if len(btcData.HourlyContext.MACDSeries) > 0 {
+				details = append(details, fmt.Sprintf("1h MACD %.3f", btcData.HourlyContext.MACD))
+			}
+		}
+		if btcData.LongerTermContext != nil {
+			details = append(details, fmt.Sprintf("4h EMA20 %.2f vs EMA50 %.2f",
+				btcData.LongerTermContext.EMA20, btcData.LongerTermContext.EMA50))
+			if len(btcData.LongerTermContext.MACDValues) > 0 {
+				macd4h := btcData.LongerTermContext.MACDValues[len(btcData.LongerTermContext.MACDValues)-1]
+				details = append(details, fmt.Sprintf("4h MACD %.3f", macd4h))
+			}
+		}
+		if len(details) > 0 {
+			btcSummary += " | " + strings.Join(details, " | ")
+		}
+		btcSummary += fmt.Sprintf(" | 3m MACD %.4f | 3m RSI7 %.2f\n\n",
+			btcData.CurrentMACD, btcData.CurrentRSI7)
+
+		sb.WriteString(btcSummary)
 	}
 
 	// 账户

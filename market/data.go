@@ -14,6 +14,7 @@ import (
 type Data struct {
 	Symbol            string
 	CurrentPrice      float64
+	PriceChange15m    float64 // 15分钟价格变化百分比
 	PriceChange1h     float64 // 1小时价格变化百分比
 	PriceChange4h     float64 // 4小时价格变化百分比
 	CurrentEMA20      float64
@@ -22,6 +23,8 @@ type Data struct {
 	OpenInterest      *OIData
 	FundingRate       float64
 	IntradaySeries    *IntradayData
+	MidTermContext    *TimeframeSnapshot
+	HourlyContext     *TimeframeSnapshot
 	LongerTermContext *LongerTermData
 }
 
@@ -38,6 +41,18 @@ type IntradayData struct {
 	MACDValues  []float64
 	RSI7Values  []float64
 	RSI14Values []float64
+}
+
+// TimeframeSnapshot 中短周期数据快照
+type TimeframeSnapshot struct {
+	EMA20        float64
+	EMA50        float64
+	MACD         float64
+	RSI14        float64
+	CloseSeries  []float64
+	VolumeSeries []float64
+	MACDSeries   []float64
+	RSI14Series  []float64
 }
 
 // LongerTermData 长期数据(4小时时间框架)
@@ -68,10 +83,22 @@ func Get(symbol string) (*Data, error) {
 	// 标准化symbol
 	symbol = Normalize(symbol)
 
-	// 获取3分钟K线数据 (最近10个)
-	klines3m, err := getKlines(symbol, "3m", 40) // 多获取一些用于计算
+	// 获取3分钟K线数据 (最近80个)
+	klines3m, err := getKlines(symbol, "3m", 80) // 多获取一些用于计算
 	if err != nil {
 		return nil, fmt.Errorf("获取3分钟K线失败: %v", err)
+	}
+
+	// 获取15分钟K线数据
+	klines15m, err := getKlines(symbol, "15m", 120)
+	if err != nil {
+		return nil, fmt.Errorf("获取15分钟K线失败: %v", err)
+	}
+
+	// 获取1小时K线数据
+	klines1h, err := getKlines(symbol, "1h", 120)
+	if err != nil {
+		return nil, fmt.Errorf("获取1小时K线失败: %v", err)
 	}
 
 	// 获取4小时K线数据 (最近10个)
@@ -87,12 +114,23 @@ func Get(symbol string) (*Data, error) {
 	currentRSI7 := calculateRSI(klines3m, 7)
 
 	// 计算价格变化百分比
-	// 1小时价格变化 = 20个3分钟K线前的价格
+	// 15分钟价格变化
+	priceChange15m := 0.0
+	if len(klines15m) >= 2 {
+		price15mAgo := klines15m[len(klines15m)-2].Close
+		current15m := klines15m[len(klines15m)-1].Close
+		if price15mAgo > 0 {
+			priceChange15m = ((current15m - price15mAgo) / price15mAgo) * 100
+		}
+	}
+
+	// 1小时价格变化
 	priceChange1h := 0.0
-	if len(klines3m) >= 21 { // 至少需要21根K线 (当前 + 20根前)
-		price1hAgo := klines3m[len(klines3m)-21].Close
+	if len(klines1h) >= 2 {
+		price1hAgo := klines1h[len(klines1h)-2].Close
+		current1h := klines1h[len(klines1h)-1].Close
 		if price1hAgo > 0 {
-			priceChange1h = ((currentPrice - price1hAgo) / price1hAgo) * 100
+			priceChange1h = ((current1h - price1hAgo) / price1hAgo) * 100
 		}
 	}
 
@@ -115,8 +153,10 @@ func Get(symbol string) (*Data, error) {
 	// 获取Funding Rate
 	fundingRate, _ := getFundingRate(symbol)
 
-	// 计算日内系列数据
+	// 计算日内及多周期系列数据
 	intradayData := calculateIntradaySeries(klines3m)
+	midTermData := calculateTimeframeSnapshot(klines15m)
+	hourlyData := calculateTimeframeSnapshot(klines1h)
 
 	// 计算长期数据
 	longerTermData := calculateLongerTermData(klines4h)
@@ -124,6 +164,7 @@ func Get(symbol string) (*Data, error) {
 	return &Data{
 		Symbol:            symbol,
 		CurrentPrice:      currentPrice,
+		PriceChange15m:    priceChange15m,
 		PriceChange1h:     priceChange1h,
 		PriceChange4h:     priceChange4h,
 		CurrentEMA20:      currentEMA20,
@@ -132,6 +173,8 @@ func Get(symbol string) (*Data, error) {
 		OpenInterest:      oiData,
 		FundingRate:       fundingRate,
 		IntradaySeries:    intradayData,
+		MidTermContext:    midTermData,
+		HourlyContext:     hourlyData,
 		LongerTermContext: longerTermData,
 	}, nil
 }
@@ -340,6 +383,35 @@ func calculateIntradaySeries(klines []Kline) *IntradayData {
 	return data
 }
 
+// calculateTimeframeSnapshot 计算15分钟/1小时等周期的关键指标
+func calculateTimeframeSnapshot(klines []Kline) *TimeframeSnapshot {
+	if len(klines) == 0 {
+		return nil
+	}
+
+	snapshot := &TimeframeSnapshot{
+		CloseSeries:  extractRecentSeries(klines, func(k Kline) float64 { return k.Close }, 10),
+		VolumeSeries: extractRecentSeries(klines, func(k Kline) float64 { return k.Volume }, 10),
+	}
+
+	if len(klines) >= 20 {
+		snapshot.EMA20 = calculateEMA(klines, 20)
+	}
+	if len(klines) >= 50 {
+		snapshot.EMA50 = calculateEMA(klines, 50)
+	}
+	if len(klines) >= 26 {
+		snapshot.MACD = calculateMACD(klines)
+		snapshot.MACDSeries = calculateMACDSeries(klines, 10)
+	}
+	if len(klines) > 14 {
+		snapshot.RSI14 = calculateRSI(klines, 14)
+		snapshot.RSI14Series = calculateRSISeries(klines, 14, 10)
+	}
+
+	return snapshot
+}
+
 // calculateLongerTermData 计算长期数据
 func calculateLongerTermData(klines []Kline) *LongerTermData {
 	data := &LongerTermData{
@@ -452,12 +524,71 @@ func getFundingRate(symbol string) (float64, error) {
 	return rate, nil
 }
 
+// calculateMACDSeries 计算最近若干点的MACD序列
+func calculateMACDSeries(klines []Kline, count int) []float64 {
+	if count <= 0 || len(klines) < 26 {
+		return nil
+	}
+
+	start := len(klines) - count
+	if start < 25 {
+		start = 25
+	}
+
+	values := make([]float64, 0, len(klines)-start)
+	for i := start; i < len(klines); i++ {
+		values = append(values, calculateMACD(klines[:i+1]))
+	}
+
+	return values
+}
+
+// calculateRSISeries 计算最近若干点的RSI序列
+func calculateRSISeries(klines []Kline, period, count int) []float64 {
+	if count <= 0 || len(klines) <= period {
+		return nil
+	}
+
+	start := len(klines) - count
+	if start < period {
+		start = period
+	}
+
+	values := make([]float64, 0, len(klines)-start)
+	for i := start; i < len(klines); i++ {
+		values = append(values, calculateRSI(klines[:i+1], period))
+	}
+
+	return values
+}
+
+// extractRecentSeries 获取最近count个数据点
+func extractRecentSeries(klines []Kline, selector func(Kline) float64, count int) []float64 {
+	if count <= 0 || len(klines) == 0 {
+		return nil
+	}
+
+	start := len(klines) - count
+	if start < 0 {
+		start = 0
+	}
+
+	result := make([]float64, 0, len(klines)-start)
+	for i := start; i < len(klines); i++ {
+		result = append(result, selector(klines[i]))
+	}
+
+	return result
+}
+
 // Format 格式化输出市场数据
 func Format(data *Data) string {
 	var sb strings.Builder
 
 	sb.WriteString(fmt.Sprintf("current_price = %.2f, current_ema20 = %.3f, current_macd = %.3f, current_rsi (7 period) = %.3f\n\n",
 		data.CurrentPrice, data.CurrentEMA20, data.CurrentMACD, data.CurrentRSI7))
+	sb.WriteString(fmt.Sprintf("price_change (15m/1h/4h) = %+.2f%% / %+.2f%% / %+.2f%%\n\n",
+		data.PriceChange15m, data.PriceChange1h, data.PriceChange4h))
 
 	sb.WriteString(fmt.Sprintf("In addition, here is the latest %s open interest and funding rate for perps:\n\n",
 		data.Symbol))
@@ -490,6 +621,44 @@ func Format(data *Data) string {
 
 		if len(data.IntradaySeries.RSI14Values) > 0 {
 			sb.WriteString(fmt.Sprintf("RSI indicators (14‑Period): %s\n\n", formatFloatSlice(data.IntradaySeries.RSI14Values)))
+		}
+	}
+
+	if data.MidTermContext != nil {
+		sb.WriteString("Mid-term context (15-minute timeframe):\n\n")
+		sb.WriteString(fmt.Sprintf("EMA20: %.3f vs. EMA50: %.3f | MACD: %.3f | RSI14: %.3f\n\n",
+			data.MidTermContext.EMA20, data.MidTermContext.EMA50, data.MidTermContext.MACD, data.MidTermContext.RSI14))
+
+		if len(data.MidTermContext.CloseSeries) > 0 {
+			sb.WriteString(fmt.Sprintf("Close series: %s\n\n", formatFloatSlice(data.MidTermContext.CloseSeries)))
+		}
+		if len(data.MidTermContext.VolumeSeries) > 0 {
+			sb.WriteString(fmt.Sprintf("Volume series: %s\n\n", formatFloatSlice(data.MidTermContext.VolumeSeries)))
+		}
+		if len(data.MidTermContext.MACDSeries) > 0 {
+			sb.WriteString(fmt.Sprintf("MACD series: %s\n\n", formatFloatSlice(data.MidTermContext.MACDSeries)))
+		}
+		if len(data.MidTermContext.RSI14Series) > 0 {
+			sb.WriteString(fmt.Sprintf("RSI14 series: %s\n\n", formatFloatSlice(data.MidTermContext.RSI14Series)))
+		}
+	}
+
+	if data.HourlyContext != nil {
+		sb.WriteString("Hourly context (1-hour timeframe):\n\n")
+		sb.WriteString(fmt.Sprintf("EMA20: %.3f vs. EMA50: %.3f | MACD: %.3f | RSI14: %.3f\n\n",
+			data.HourlyContext.EMA20, data.HourlyContext.EMA50, data.HourlyContext.MACD, data.HourlyContext.RSI14))
+
+		if len(data.HourlyContext.CloseSeries) > 0 {
+			sb.WriteString(fmt.Sprintf("Close series: %s\n\n", formatFloatSlice(data.HourlyContext.CloseSeries)))
+		}
+		if len(data.HourlyContext.VolumeSeries) > 0 {
+			sb.WriteString(fmt.Sprintf("Volume series: %s\n\n", formatFloatSlice(data.HourlyContext.VolumeSeries)))
+		}
+		if len(data.HourlyContext.MACDSeries) > 0 {
+			sb.WriteString(fmt.Sprintf("MACD series: %s\n\n", formatFloatSlice(data.HourlyContext.MACDSeries)))
+		}
+		if len(data.HourlyContext.RSI14Series) > 0 {
+			sb.WriteString(fmt.Sprintf("RSI14 series: %s\n\n", formatFloatSlice(data.HourlyContext.RSI14Series)))
 		}
 	}
 
