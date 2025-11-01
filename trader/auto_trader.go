@@ -556,23 +556,36 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		}
 		updateTime := at.positionFirstSeenTime[posKey]
 
-		// 记录持仓的最高盈亏百分比（用于盈利保护）
-		if maxPnL, exists := at.positionPnLHigh[posKey]; !exists || pnlPct > maxPnL {
+		peakPnL := pnlPct
+		if maxPnL, exists := at.positionPnLHigh[posKey]; exists {
+			if pnlPct > maxPnL {
+				peakPnL = pnlPct
+				at.positionPnLHigh[posKey] = pnlPct
+			} else {
+				peakPnL = maxPnL
+			}
+		} else {
 			at.positionPnLHigh[posKey] = pnlPct
+		}
+		drawdownFromPeak := peakPnL - pnlPct
+		if drawdownFromPeak < 0 {
+			drawdownFromPeak = 0
 		}
 
 		positionInfos = append(positionInfos, decision.PositionInfo{
-			Symbol:           symbol,
-			Side:             side,
-			EntryPrice:       entryPrice,
-			MarkPrice:        markPrice,
-			Quantity:         quantity,
-			Leverage:         leverage,
-			UnrealizedPnL:    unrealizedPnl,
-			UnrealizedPnLPct: pnlPct,
-			LiquidationPrice: liquidationPrice,
-			MarginUsed:       marginUsed,
-			UpdateTime:       updateTime,
+			Symbol:               symbol,
+			Side:                 side,
+			EntryPrice:           entryPrice,
+			MarkPrice:            markPrice,
+			Quantity:             quantity,
+			Leverage:             leverage,
+			UnrealizedPnL:        unrealizedPnl,
+			UnrealizedPnLPct:     pnlPct,
+			PeakUnrealizedPnLPct: peakPnL,
+			DrawdownFromPeakPct:  drawdownFromPeak,
+			LiquidationPrice:     liquidationPrice,
+			MarginUsed:           marginUsed,
+			UpdateTime:           updateTime,
 		})
 	}
 

@@ -16,17 +16,19 @@ import (
 
 // PositionInfo 持仓信息
 type PositionInfo struct {
-	Symbol           string  `json:"symbol"`
-	Side             string  `json:"side"` // "long" or "short"
-	EntryPrice       float64 `json:"entry_price"`
-	MarkPrice        float64 `json:"mark_price"`
-	Quantity         float64 `json:"quantity"`
-	Leverage         int     `json:"leverage"`
-	UnrealizedPnL    float64 `json:"unrealized_pnl"`
-	UnrealizedPnLPct float64 `json:"unrealized_pnl_pct"`
-	LiquidationPrice float64 `json:"liquidation_price"`
-	MarginUsed       float64 `json:"margin_used"`
-	UpdateTime       int64   `json:"update_time"` // 持仓更新时间戳（毫秒）
+	Symbol               string  `json:"symbol"`
+	Side                 string  `json:"side"` // "long" or "short"
+	EntryPrice           float64 `json:"entry_price"`
+	MarkPrice            float64 `json:"mark_price"`
+	Quantity             float64 `json:"quantity"`
+	Leverage             int     `json:"leverage"`
+	UnrealizedPnL        float64 `json:"unrealized_pnl"`
+	UnrealizedPnLPct     float64 `json:"unrealized_pnl_pct"`
+	PeakUnrealizedPnLPct float64 `json:"peak_unrealized_pnl_pct,omitempty"`
+	DrawdownFromPeakPct  float64 `json:"drawdown_from_peak_pct,omitempty"`
+	LiquidationPrice     float64 `json:"liquidation_price"`
+	MarginUsed           float64 `json:"margin_used"`
+	UpdateTime           int64   `json:"update_time"` // 持仓更新时间戳（毫秒）
 }
 
 // AccountInfo 账户信息
@@ -474,17 +476,19 @@ type promptRisk struct {
 }
 
 type promptPosition struct {
-	Symbol           string  `json:"symbol"`
-	Side             string  `json:"side"`
-	EntryPrice       float64 `json:"entry_price"`
-	MarkPrice        float64 `json:"mark_price"`
-	Leverage         int     `json:"leverage"`
-	Quantity         float64 `json:"quantity"`
-	PositionValue    float64 `json:"position_value"`
-	MarginUsed       float64 `json:"margin_used"`
-	UnrealizedPnLPct float64 `json:"unrealized_pnl_pct"`
-	LiquidationPrice float64 `json:"liquidation_price"`
-	HoldMinutes      int     `json:"hold_minutes"`
+	Symbol               string  `json:"symbol"`
+	Side                 string  `json:"side"`
+	EntryPrice           float64 `json:"entry_price"`
+	MarkPrice            float64 `json:"mark_price"`
+	Leverage             int     `json:"leverage"`
+	Quantity             float64 `json:"quantity"`
+	PositionValue        float64 `json:"position_value"`
+	MarginUsed           float64 `json:"margin_used"`
+	UnrealizedPnLPct     float64 `json:"unrealized_pnl_pct"`
+	PeakUnrealizedPnLPct float64 `json:"peak_unrealized_pnl_pct,omitempty"`
+	DrawdownFromPeakPct  float64 `json:"drawdown_from_peak_pct,omitempty"`
+	LiquidationPrice     float64 `json:"liquidation_price"`
+	HoldMinutes          int     `json:"hold_minutes"`
 }
 
 type promptRecentTrade struct {
@@ -738,17 +742,19 @@ func buildOpenPositionsSnapshot(ctx *Context) []promptPosition {
 	for _, pos := range ctx.Positions {
 		positionValue := pos.Quantity * pos.MarkPrice
 		positions = append(positions, promptPosition{
-			Symbol:           pos.Symbol,
-			Side:             pos.Side,
-			EntryPrice:       pos.EntryPrice,
-			MarkPrice:        pos.MarkPrice,
-			Leverage:         pos.Leverage,
-			Quantity:         pos.Quantity,
-			PositionValue:    positionValue,
-			MarginUsed:       pos.MarginUsed,
-			UnrealizedPnLPct: pos.UnrealizedPnLPct,
-			LiquidationPrice: pos.LiquidationPrice,
-			HoldMinutes:      deriveHoldMinutes(pos.UpdateTime),
+			Symbol:               pos.Symbol,
+			Side:                 pos.Side,
+			EntryPrice:           pos.EntryPrice,
+			MarkPrice:            pos.MarkPrice,
+			Leverage:             pos.Leverage,
+			Quantity:             pos.Quantity,
+			PositionValue:        positionValue,
+			MarginUsed:           pos.MarginUsed,
+			UnrealizedPnLPct:     pos.UnrealizedPnLPct,
+			PeakUnrealizedPnLPct: pos.PeakUnrealizedPnLPct,
+			DrawdownFromPeakPct:  pos.DrawdownFromPeakPct,
+			LiquidationPrice:     pos.LiquidationPrice,
+			HoldMinutes:          deriveHoldMinutes(pos.UpdateTime),
 		})
 	}
 
