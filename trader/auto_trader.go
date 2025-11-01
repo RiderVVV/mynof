@@ -68,10 +68,10 @@ type AutoTraderConfig struct {
 }
 
 const (
-	profitProtectActivationPct  = 12.0 // 触发盈利保护的最小峰值（%）
-	profitProtectLockFloorPct   = 5.0  // 回撤保护的最低保留利润（%）
-	profitProtectMinRetracePct  = 3.0  // 触发保护所需的最小回撤幅度（%）
-	profitProtectRetentionRatio = 0.5  // 保护时至少保留的利润比例
+	defaultProfitProtectActivationPct  = 12.0 // 默认触发盈利保护的峰值（%）
+	defaultProfitProtectLockFloorPct   = 5.0  // 默认回撤保护最低保留利润（%）
+	defaultProfitProtectMinRetracePct  = 3.0  // 默认保护触发的最小回撤幅度（%）
+	defaultProfitProtectRetentionRatio = 0.5  // 默认保护时至少保留的利润比例
 )
 
 // AutoTrader 自动交易器
@@ -93,6 +93,14 @@ type AutoTrader struct {
 	callCount             int              // AI调用次数
 	positionFirstSeenTime map[string]int64 // 持仓首次出现时间 (symbol_side -> timestamp毫秒)
 	positionPnLHigh       map[string]float64
+}
+
+type profitProtectionThresholds struct {
+	activationPct float64
+	retracePct    float64
+	retentionRate float64
+	lockFloorPct  float64
+	atrPercent    float64
 }
 
 // NewAutoTrader 创建自动交易器
@@ -198,11 +206,7 @@ func (at *AutoTrader) Run() error {
 	log.Printf("💰 初始余额: %.2f USDT", at.initialBalance)
 	log.Printf("⚙️  扫描间隔: %v", at.config.ScanInterval)
 	log.Println("🤖 AI将全权决定杠杆、仓位大小、止损止盈等参数")
-	log.Printf("🛡 盈利回撤保护启用: 峰值≥%.1f%% & 回撤≥%.1f%% 且收益跌至 ≤ max(%.0f%%峰值, %.1f%%) 时将强制平仓",
-		profitProtectActivationPct,
-		profitProtectMinRetracePct,
-		profitProtectRetentionRatio*100,
-		profitProtectLockFloorPct)
+	log.Println("🛡 盈利回撤保护启用: 阈值将随杠杆与4H ATR动态调整（默认参考 ≥12% 盈利、回撤 ≥3%、锁定 ≥50% 利润）。")
 
 	ticker := time.NewTicker(at.config.ScanInterval)
 	defer ticker.Stop()
@@ -690,41 +694,156 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 	return ctx, nil
 }
 
+func clampFloat(min, max, value float64) float64 {
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
+}
+
+func (at *AutoTrader) computeProfitProtectionThresholds(pos decision.PositionInfo, marketCache map[string]*market.Data) (profitProtectionThresholds, error) {
+	thresholds := profitProtectionThresholds{
+		activationPct: defaultProfitProtectActivationPct,
+		retracePct:    defaultProfitProtectMinRetracePct,
+		retentionRate: defaultProfitProtectRetentionRatio,
+		lockFloorPct:  defaultProfitProtectLockFloorPct,
+		atrPercent:    0,
+	}
+
+	leverage := math.Max(float64(pos.Leverage), 1)
+
+	var data *market.Data
+	var err error
+	if marketCache != nil {
+		if cached, ok := marketCache[pos.Symbol]; ok {
+			data = cached
+		}
+	}
+	if data == nil {
+		data, err = market.Get(pos.Symbol)
+		if err != nil {
+			log.Printf("⚠️  获取 %s 市场数据失败（使用默认盈利保护阈值）: %v", pos.Symbol, err)
+		} else if marketCache != nil {
+			marketCache[pos.Symbol] = data
+		}
+	}
+
+	atrPct := extractAtrPercent(data)
+	if atrPct <= 0 {
+		atrPct = 5.0 // fallback: assume moderate波动
+	}
+	thresholds.atrPercent = atrPct
+
+	activation := 9.0 + atrPct*0.35
+	if leverage > 5 {
+		activation -= (leverage - 5) * 0.6
+	} else {
+		activation += (5 - leverage) * 0.4
+	}
+	thresholds.activationPct = clampFloat(6.0, 18.0, activation)
+
+	retrace := 2.3 + atrPct*0.22
+	retrace -= math.Max(leverage-8, 0) * 0.17
+	thresholds.retracePct = clampFloat(1.5, 6.0, retrace)
+
+	retention := 0.45 + math.Max(leverage-6, 0)*0.025
+	retention -= math.Max(atrPct-8, 0) * 0.01
+	thresholds.retentionRate = clampFloat(0.38, 0.65, retention)
+
+	lockFloor := defaultProfitProtectLockFloorPct + atrPct*0.2
+	if leverage > 10 {
+		lockFloor += (leverage - 10) * 0.3
+	}
+	thresholds.lockFloorPct = clampFloat(3.0, 12.0, lockFloor)
+
+	return thresholds, err
+}
+
+func extractAtrPercent(data *market.Data) float64 {
+	if data == nil || data.CurrentPrice <= 0 {
+		return 0
+	}
+
+	if data.LongerTermContext != nil {
+		if data.LongerTermContext.ATR14 > 0 {
+			return (data.LongerTermContext.ATR14 / data.CurrentPrice) * 100
+		}
+		if data.LongerTermContext.ATR3 > 0 {
+			return (data.LongerTermContext.ATR3 / data.CurrentPrice) * 100
+		}
+	}
+
+	return 0
+}
+
 // applyProfitProtection 针对高收益回撤执行强制止盈保护
 func (at *AutoTrader) applyProfitProtection(ctx *decision.Context, record *logger.DecisionRecord) (bool, error) {
 	forcedClosures := 0
 	failedClosures := 0
 	var errorMessages []string
 
+	marketCache := make(map[string]*market.Data)
+
 	for _, pos := range ctx.Positions {
 		posKey := pos.Symbol + "_" + pos.Side
 		currentPnL := pos.UnrealizedPnLPct
 
+		thresholds, _ := at.computeProfitProtectionThresholds(pos, marketCache)
+
 		peakPnL, tracked := at.positionPnLHigh[posKey]
 		if !tracked {
 			at.positionPnLHigh[posKey] = currentPnL
-			continue
+			peakPnL = currentPnL
 		}
 
 		if currentPnL > peakPnL {
 			at.positionPnLHigh[posKey] = currentPnL
+			if peakPnL < thresholds.activationPct && currentPnL >= thresholds.activationPct {
+				msg := fmt.Sprintf("🛡 盈利回撤保护就位: %s %s 当前%.2f%% (激活 ≥%.2f%% | ATR %.2f%% | 杠杆 %dx)",
+					pos.Symbol, pos.Side, currentPnL, thresholds.activationPct, thresholds.atrPercent, pos.Leverage)
+				log.Println(msg)
+				record.ExecutionLog = append(record.ExecutionLog, msg)
+			}
 			continue
 		}
 
-		if peakPnL < profitProtectActivationPct {
+		if peakPnL < thresholds.activationPct {
 			continue
 		}
 
 		retrace := peakPnL - currentPnL
-		lockLevel := math.Max(peakPnL*profitProtectRetentionRatio, profitProtectLockFloorPct)
+		lockLevel := math.Max(peakPnL*thresholds.retentionRate, thresholds.lockFloorPct)
+		if lockLevel > peakPnL {
+			lockLevel = peakPnL
+		}
 
-		// 当回撤幅度达到阈值或利润回吐到0及以下时触发强制平仓
-		if (currentPnL <= lockLevel && retrace >= profitProtectMinRetracePct) || currentPnL <= 0 {
-			log.Printf("🛡 盈利回撤保护触发: %s %s 峰值%.2f%% → 当前%.2f%% (回撤%.2f%%)",
-				pos.Symbol, pos.Side, peakPnL, currentPnL, retrace)
-			record.ExecutionLog = append(record.ExecutionLog,
-				fmt.Sprintf("🛡 盈利回撤保护触发: %s %s 峰值%.2f%% → 当前%.2f%% (回撤%.2f%%)",
-					pos.Symbol, pos.Side, peakPnL, currentPnL, retrace))
+		triggered := false
+		if currentPnL <= 0 {
+			triggered = true
+		} else if currentPnL <= lockLevel && retrace >= thresholds.retracePct {
+			triggered = true
+		}
+
+		if triggered {
+			lockTarget := math.Max(thresholds.retentionRate*peakPnL, thresholds.lockFloorPct)
+			logMsg := fmt.Sprintf("🛡 盈利回撤保护触发: %s %s 峰值%.2f%% → 当前%.2f%% (回撤%.2f%% | 激活 ≥%.2f%% | 回撤 ≥%.2f%% | 锁定线 %.2f%% [max %.0f%%峰值, %.2f%%] | ATR %.2f%% | 杠杆 %dx)",
+				pos.Symbol,
+				pos.Side,
+				peakPnL,
+				currentPnL,
+				retrace,
+				thresholds.activationPct,
+				thresholds.retracePct,
+				lockLevel,
+				thresholds.retentionRate*100,
+				lockTarget,
+				thresholds.atrPercent,
+				pos.Leverage)
+			log.Println(logMsg)
+			record.ExecutionLog = append(record.ExecutionLog, logMsg)
 
 			if err := at.trader.CancelAllOrders(pos.Symbol); err != nil {
 				log.Printf("  ⚠ 取消 %s 未完成委托失败: %v", pos.Symbol, err)
@@ -771,8 +890,8 @@ func (at *AutoTrader) applyProfitProtection(ctx *decision.Context, record *logge
 				}
 				actionRecord.Success = true
 				record.ExecutionLog = append(record.ExecutionLog,
-					fmt.Sprintf("✓ 盈利回撤保护平仓成功: %s %s 保留利润%.2f%%",
-						pos.Symbol, pos.Side, math.Max(currentPnL, 0)))
+					fmt.Sprintf("✓ 盈利回撤保护平仓成功: %s %s 保留利润%.2f%% (锁定线%.2f%%)",
+						pos.Symbol, pos.Side, math.Max(currentPnL, 0), lockLevel))
 				delete(at.positionPnLHigh, posKey)
 				delete(at.positionFirstSeenTime, posKey)
 			}
