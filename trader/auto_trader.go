@@ -198,6 +198,11 @@ func (at *AutoTrader) Run() error {
 	log.Printf("💰 初始余额: %.2f USDT", at.initialBalance)
 	log.Printf("⚙️  扫描间隔: %v", at.config.ScanInterval)
 	log.Println("🤖 AI将全权决定杠杆、仓位大小、止损止盈等参数")
+	log.Printf("🛡 盈利回撤保护启用: 峰值≥%.1f%% & 回撤≥%.1f%% 且收益跌至 ≤ max(%.0f%%峰值, %.1f%%) 时将强制平仓",
+		profitProtectActivationPct,
+		profitProtectMinRetracePct,
+		profitProtectRetentionRatio*100,
+		profitProtectLockFloorPct)
 
 	ticker := time.NewTicker(at.config.ScanInterval)
 	defer ticker.Stop()
