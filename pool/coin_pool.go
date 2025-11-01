@@ -324,6 +324,12 @@ func normalizeSymbol(symbol string) string {
 	// 转为大写
 	symbol = toUpper(symbol)
 
+	// 去掉分隔符，只保留字母和数字，兼容诸如 "BTC/USDT" 的配置
+	cleaned := removeNonAlphanumeric(symbol)
+	if cleaned != "" {
+		symbol = cleaned
+	}
+
 	// 确保以USDT结尾
 	if !endsWith(symbol, "USDT") {
 		symbol = symbol + "USDT"
@@ -351,6 +357,24 @@ func toUpper(s string) string {
 			c = c - 'a' + 'A'
 		}
 		result += string(c)
+	}
+	return result
+}
+
+// removeNonAlphanumeric 仅保留字母和数字字符
+func removeNonAlphanumeric(s string) string {
+	result := ""
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		isDigit := c >= '0' && c <= '9'
+		isUpper := c >= 'A' && c <= 'Z'
+		isLower := c >= 'a' && c <= 'z'
+		if isDigit || isUpper || isLower {
+			if isLower {
+				c = c - 'a' + 'A'
+			}
+			result += string(c)
+		}
 	}
 	return result
 }

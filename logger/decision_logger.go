@@ -21,9 +21,10 @@ type DecisionRecord struct {
 	Positions      []PositionSnapshot `json:"positions"`       // 持仓快照
 	CandidateCoins []string           `json:"candidate_coins"` // 候选币种列表
 	Decisions      []DecisionAction   `json:"decisions"`       // 执行的决策
-	ExecutionLog   []string           `json:"execution_log"`   // 执行日志
-	Success        bool               `json:"success"`         // 是否成功
-	ErrorMessage   string             `json:"error_message"`   // 错误信息（如果有）
+	RiskFlags      []RiskEvent        `json:"risk_flags,omitempty"`
+	ExecutionLog   []string           `json:"execution_log"` // 执行日志
+	Success        bool               `json:"success"`       // 是否成功
+	ErrorMessage   string             `json:"error_message"` // 错误信息（如果有）
 }
 
 // AccountSnapshot 账户状态快照
@@ -58,6 +59,15 @@ type DecisionAction struct {
 	Timestamp time.Time `json:"timestamp"` // 执行时间
 	Success   bool      `json:"success"`   // 是否成功
 	Error     string    `json:"error"`     // 错误信息
+}
+
+// RiskEvent 风险或风控提示
+type RiskEvent struct {
+	Symbol   string `json:"symbol"`
+	Action   string `json:"action"`
+	Issue    string `json:"issue"`
+	Severity string `json:"severity"`
+	Detail   string `json:"detail,omitempty"`
 }
 
 // DecisionLogger 决策日志记录器

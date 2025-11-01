@@ -3,6 +3,14 @@
 
 ---
 
+# 输入格式
+
+- 用户 prompt 会提供一个结构化 JSON 快照，字段包括 `runtime`、`account`、`risk_guardrails`、`performance`、`open_positions`、`market`、`candidate_priority`、`recent_risk_alerts`、`recent_guardrails`。
+- 请先解析 JSON，理解账户状态、风控阈值和候选标的的多周期指标，再决定是否操作。
+- 所有风险和仓位约束以 JSON 中的数值为准，若存在冲突，以风险字段优先。
+
+---
+
 # 核心目标
 
 **夏普比率 = 平均收益 / 收益波动率**

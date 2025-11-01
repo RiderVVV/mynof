@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"nofx/market"
 	"nofx/mcp"
 	"nofx/pool"
@@ -57,17 +58,19 @@ type OITopData struct {
 
 // Context 交易上下文（传递给AI的完整信息）
 type Context struct {
-	CurrentTime     string                  `json:"current_time"`
-	RuntimeMinutes  int                     `json:"runtime_minutes"`
-	CallCount       int                     `json:"call_count"`
-	Account         AccountInfo             `json:"account"`
-	Positions       []PositionInfo          `json:"positions"`
-	CandidateCoins  []CandidateCoin         `json:"candidate_coins"`
-	MarketDataMap   map[string]*market.Data `json:"-"` // 不序列化，但内部使用
-	OITopDataMap    map[string]*OITopData   `json:"-"` // OI Top数据映射
-	Performance     interface{}             `json:"-"` // 历史表现分析（logger.PerformanceAnalysis）
-	BTCETHLeverage  int                     `json:"-"` // BTC/ETH杠杆倍数（从配置读取）
-	AltcoinLeverage int                     `json:"-"` // 山寨币杠杆倍数（从配置读取）
+	CurrentTime      string                   `json:"current_time"`
+	RuntimeMinutes   int                      `json:"runtime_minutes"`
+	CallCount        int                      `json:"call_count"`
+	Account          AccountInfo              `json:"account"`
+	Positions        []PositionInfo           `json:"positions"`
+	CandidateCoins   []CandidateCoin          `json:"candidate_coins"`
+	MarketDataMap    map[string]*market.Data  `json:"-"` // 不序列化，但内部使用
+	OITopDataMap     map[string]*OITopData    `json:"-"` // OI Top数据映射
+	Performance      interface{}              `json:"-"` // 历史表现分析（logger.PerformanceAnalysis）
+	BTCETHLeverage   int                      `json:"-"` // BTC/ETH杠杆倍数（从配置读取）
+	AltcoinLeverage  int                      `json:"-"` // 山寨币杠杆倍数（从配置读取）
+	RecentRiskAlerts []RiskFlag               `json:"-"`
+	RecentGuardrails []MarketGuardrailWarning `json:"-"`
 }
 
 // Decision AI的交易决策
@@ -81,6 +84,15 @@ type Decision struct {
 	Confidence      int     `json:"confidence,omitempty"` // 信心度 (0-100)
 	RiskUSD         float64 `json:"risk_usd,omitempty"`   // 最大美元风险
 	Reasoning       string  `json:"reasoning"`
+}
+
+// RiskFlag 风险告警信息（用于风控复核）
+type RiskFlag struct {
+	Symbol   string `json:"symbol"`
+	Action   string `json:"action"`
+	Issue    string `json:"issue"`
+	Severity string `json:"severity"`         // high / medium / low
+	Detail   string `json:"detail,omitempty"` // 额外描述
 }
 
 // FullDecision AI的完整决策（包含思维链）
@@ -117,6 +129,33 @@ func GetFullDecision(ctx *Context, mcpClient *mcp.Client) (*FullDecision, error)
 	decision.Timestamp = time.Now()
 	decision.UserPrompt = userPrompt // 保存输入prompt
 	return decision, nil
+}
+
+// ReviewDecisions 二次风控复核（基于风险告警复查决策）
+func ReviewDecisions(ctx *Context, baseDecision *FullDecision, flags []RiskFlag, mcpClient *mcp.Client) (*FullDecision, error) {
+	if baseDecision == nil {
+		return nil, fmt.Errorf("基础决策为空，无法复核")
+	}
+	if len(flags) == 0 {
+		return baseDecision, nil
+	}
+
+	systemPrompt := buildReviewSystemPrompt()
+	userPrompt := buildReviewUserPrompt(ctx, baseDecision, flags)
+
+	aiResponse, err := mcpClient.CallWithMessages(systemPrompt, userPrompt)
+	if err != nil {
+		return nil, fmt.Errorf("调用风控复核AI失败: %w", err)
+	}
+
+	reviewedDecision, err := parseFullDecisionResponse(aiResponse, ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
+	if err != nil {
+		return nil, fmt.Errorf("解析风控复核响应失败: %w", err)
+	}
+
+	reviewedDecision.Timestamp = time.Now()
+	reviewedDecision.UserPrompt = userPrompt
+	return reviewedDecision, nil
 }
 
 // fetchMarketDataForContext 为上下文中的所有币种获取市场数据和OI数据
@@ -167,6 +206,14 @@ func fetchMarketDataForContext(ctx *Context) error {
 				log.Printf("⚠️  %s 持仓价值过低(%.2fM USD < 15M)，跳过此币种 [持仓量:%.0f × 价格:%.4f]",
 					symbol, oiValueInMillions, data.OpenInterest.Latest, data.CurrentPrice)
 				continue
+			}
+		}
+
+		guardrails := GuardrailWarningsForMarket(data)
+		if len(guardrails) > 0 {
+			ctx.RecentGuardrails = appendGuardrailHistory(ctx.RecentGuardrails, guardrails...)
+			if !isExistingPosition && hasHighSeverityGuardrail(guardrails) {
+				log.Printf("🧭  %s 命中高风险 guardrail，仍保留候选但需关注: %s", symbol, summarizeGuardrails(guardrails))
 			}
 		}
 
@@ -242,6 +289,10 @@ func buildDefaultSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeve
 
 	// === 核心使命 ===
 	sb.WriteString("你是专业的加密货币交易AI，在币安合约市场进行自主交易。\n\n")
+	sb.WriteString("# 📥 输入格式\n\n")
+	sb.WriteString("- 用户 prompt 会提供结构化 JSON 快照，字段含 runtime/account/risk_guardrails/performance/open_positions/market/candidate_priority/recent_risk_alerts/recent_guardrails。\n")
+	sb.WriteString("- 先解析 JSON，确保所有仓位、风险与候选信号满足约束，再做决策。\n")
+	sb.WriteString("- 若风险字段提示需要降频或观望（例如夏普为负），必须遵守。\n\n")
 	sb.WriteString("# 🎯 核心目标\n\n")
 	sb.WriteString("**最大化夏普比率（Sharpe Ratio）**\n\n")
 	sb.WriteString("夏普比率 = 平均收益 / 收益波动率\n\n")
@@ -352,129 +403,734 @@ func buildDefaultSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeve
 	return sb.String()
 }
 
+func buildReviewSystemPrompt() string {
+	var sb strings.Builder
+	sb.WriteString("你是加密货币量化交易团队的首席风控官。\n")
+	sb.WriteString("- 你的任务是审查前一阶段 AI 拟定的交易决策。\n")
+	sb.WriteString("- 若决策违反风险约束（仓位、风险预算、降频要求等）或缺乏说服力，你必须删除或调整。\n")
+	sb.WriteString("- 优先保护资金安全：可以将高风险操作改为 wait/hold，或降低仓位、提高止损质量。\n")
+	sb.WriteString("- 最终输出的 JSON 决策数组必须满足所有约束，并配合清晰的调整理由。\n")
+	return sb.String()
+}
+
+func buildReviewUserPrompt(ctx *Context, baseDecision *FullDecision, flags []RiskFlag) string {
+	payload := struct {
+		Snapshot          promptSnapshot `json:"snapshot"`
+		ProposedDecisions []Decision     `json:"proposed_decisions"`
+		RiskFlags         []RiskFlag     `json:"risk_flags"`
+	}{
+		Snapshot:          buildPromptSnapshot(ctx),
+		ProposedDecisions: baseDecision.Decisions,
+		RiskFlags:         flags,
+	}
+
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		data = []byte("{}")
+	}
+
+	var sb strings.Builder
+	sb.WriteString("风控复核请求：请审查拟执行的交易，处理风险告警，确保输出的最终方案安全可靠。\n\n")
+	sb.WriteString("```json\n")
+	sb.Write(data)
+	sb.WriteString("\n```\n\n")
+	sb.WriteString("要求：\n")
+	sb.WriteString("1. 针对 severity=\"high\" 的告警必须采取措施（删除、降仓、观望）。\n")
+	sb.WriteString("2. 若夏普或账户状态要求降频/观望，严格执行。\n")
+	sb.WriteString("3. 输出格式与主流程一致：先给出思维链，再给出 JSON 决策数组。\n")
+	return sb.String()
+}
+
+const (
+	maxPromptMarkets            = 18
+	maxRecentTradesInPrompt     = 5
+	MaxRecentGuardrailSnapshots = 16
+)
+
+type promptRuntime struct {
+	CurrentTime    string `json:"current_time"`
+	RuntimeMinutes int    `json:"runtime_minutes"`
+	CallCount      int    `json:"call_count"`
+}
+
+type promptAccount struct {
+	TotalEquity      float64 `json:"total_equity"`
+	AvailableBalance float64 `json:"available_balance"`
+	AvailablePct     float64 `json:"available_pct"`
+	TotalPnLPct      float64 `json:"total_pnl_pct"`
+	MarginUsedPct    float64 `json:"margin_used_pct"`
+	PositionCount    int     `json:"position_count"`
+}
+
+type promptRisk struct {
+	MaxPositions       int                `json:"max_positions"`
+	OpenPositions      int                `json:"open_positions"`
+	SlotsRemaining     int                `json:"slots_remaining"`
+	MarginHeadroomPct  float64            `json:"margin_headroom_pct"`
+	RiskBudgetUSD      float64            `json:"risk_budget_usd"`
+	MaxPositionUSD     map[string]float64 `json:"max_position_usd"`
+	MaxLeverage        map[string]int     `json:"max_leverage"`
+	SharpeCoolingLevel string             `json:"sharpe_cooling_level,omitempty"`
+}
+
+type promptPosition struct {
+	Symbol           string  `json:"symbol"`
+	Side             string  `json:"side"`
+	EntryPrice       float64 `json:"entry_price"`
+	MarkPrice        float64 `json:"mark_price"`
+	Leverage         int     `json:"leverage"`
+	Quantity         float64 `json:"quantity"`
+	PositionValue    float64 `json:"position_value"`
+	MarginUsed       float64 `json:"margin_used"`
+	UnrealizedPnLPct float64 `json:"unrealized_pnl_pct"`
+	LiquidationPrice float64 `json:"liquidation_price"`
+	HoldMinutes      int     `json:"hold_minutes"`
+}
+
+type promptRecentTrade struct {
+	Symbol      string  `json:"symbol"`
+	Side        string  `json:"side"`
+	PnL         float64 `json:"pnl"`
+	PnLPct      float64 `json:"pnl_pct"`
+	Duration    string  `json:"duration"`
+	StopLossHit bool    `json:"stop_loss_hit"`
+}
+
+type promptPerformance struct {
+	SharpeRatio  float64             `json:"sharpe_ratio"`
+	TotalTrades  int                 `json:"total_trades"`
+	WinRate      float64             `json:"win_rate"`
+	ProfitFactor float64             `json:"profit_factor"`
+	AvgWin       float64             `json:"avg_win"`
+	AvgLoss      float64             `json:"avg_loss"`
+	BestSymbol   string              `json:"best_symbol,omitempty"`
+	WorstSymbol  string              `json:"worst_symbol,omitempty"`
+	RecentTrades []promptRecentTrade `json:"recent_trades,omitempty"`
+}
+
+type promptOpenInterest struct {
+	Latest  float64 `json:"latest"`
+	Average float64 `json:"average"`
+	Ratio   float64 `json:"ratio"`
+}
+
+type promptVolatility struct {
+	ATR3     float64 `json:"atr3"`
+	ATR14    float64 `json:"atr14"`
+	ATR14Pct float64 `json:"atr14_pct"`
+}
+
+type promptTimeframe struct {
+	EMA20     float64 `json:"ema20"`
+	EMA50     float64 `json:"ema50"`
+	MACD      float64 `json:"macd"`
+	RSI14     float64 `json:"rsi14"`
+	TrendBias string  `json:"trend_bias"`
+}
+
+type promptIntraday struct {
+	MACD       float64 `json:"macd"`
+	RSI7       float64 `json:"rsi7"`
+	PriceSlope float64 `json:"price_slope_pct"`
+}
+
+// MarketGuardrailWarning 市场硬性约束提示
+type MarketGuardrailWarning struct {
+	Code     string `json:"code"`
+	Severity string `json:"severity"`
+	Detail   string `json:"detail,omitempty"`
+}
+
+type promptMarket struct {
+	Symbol            string                   `json:"symbol"`
+	Sources           []string                 `json:"sources,omitempty"`
+	TrendBias         string                   `json:"trend_bias"`
+	Price             float64                  `json:"price"`
+	ChangePct         map[string]float64       `json:"change_pct"`
+	MomentumBias      map[string]string        `json:"momentum_bias,omitempty"`
+	FundingRate       float64                  `json:"funding_rate"`
+	OpenInterest      *promptOpenInterest      `json:"open_interest,omitempty"`
+	Volatility        *promptVolatility        `json:"volatility,omitempty"`
+	H1                *promptTimeframe         `json:"h1,omitempty"`
+	H4                *promptTimeframe         `json:"h4,omitempty"`
+	Intraday          *promptIntraday          `json:"intraday,omitempty"`
+	ConfidenceFlags   []string                 `json:"confidence_flags,omitempty"`
+	GuardrailWarnings []MarketGuardrailWarning `json:"guardrail_warnings,omitempty"`
+}
+
+type promptSnapshot struct {
+	Runtime           promptRuntime            `json:"runtime"`
+	Account           promptAccount            `json:"account"`
+	Risk              promptRisk               `json:"risk_guardrails"`
+	Performance       *promptPerformance       `json:"performance,omitempty"`
+	OpenPositions     []promptPosition         `json:"open_positions"`
+	Market            []promptMarket           `json:"market"`
+	CandidatePriority []string                 `json:"candidate_priority,omitempty"`
+	RecentRiskAlerts  []RiskFlag               `json:"recent_risk_alerts,omitempty"`
+	RecentGuardrails  []MarketGuardrailWarning `json:"recent_guardrails,omitempty"`
+}
+
+func buildPromptSnapshot(ctx *Context) promptSnapshot {
+	availablePct := 0.0
+	if ctx.Account.TotalEquity > 0 {
+		availablePct = (ctx.Account.AvailableBalance / ctx.Account.TotalEquity) * 100
+	}
+
+	riskBudget := ctx.Account.TotalEquity * 0.03
+	marginHeadroom := math.Max(0, 90-ctx.Account.MarginUsedPct)
+
+	runtime := promptRuntime{
+		CurrentTime:    ctx.CurrentTime,
+		RuntimeMinutes: ctx.RuntimeMinutes,
+		CallCount:      ctx.CallCount,
+	}
+
+	account := promptAccount{
+		TotalEquity:      ctx.Account.TotalEquity,
+		AvailableBalance: ctx.Account.AvailableBalance,
+		AvailablePct:     availablePct,
+		TotalPnLPct:      ctx.Account.TotalPnLPct,
+		MarginUsedPct:    ctx.Account.MarginUsedPct,
+		PositionCount:    ctx.Account.PositionCount,
+	}
+
+	risk := promptRisk{
+		MaxPositions:      3,
+		OpenPositions:     len(ctx.Positions),
+		SlotsRemaining:    int(math.Max(0, float64(3-len(ctx.Positions)))),
+		MarginHeadroomPct: marginHeadroom,
+		RiskBudgetUSD:     riskBudget,
+		MaxPositionUSD: map[string]float64{
+			"altcoin": ctx.Account.TotalEquity * 1.5,
+			"btc_eth": ctx.Account.TotalEquity * 10,
+		},
+		MaxLeverage: map[string]int{
+			"altcoin": ctx.AltcoinLeverage,
+			"btc_eth": ctx.BTCETHLeverage,
+		},
+	}
+
+	performance := buildPerformanceSnapshot(ctx.Performance)
+	if performance != nil {
+		if performance.SharpeRatio < -0.5 {
+			risk.SharpeCoolingLevel = "halt_6_cycles"
+		} else if performance.SharpeRatio < 0 {
+			risk.SharpeCoolingLevel = "only_high_confidence_trades"
+		}
+	}
+
+	positions := buildOpenPositionsSnapshot(ctx)
+	if positions == nil {
+		positions = []promptPosition{}
+	}
+
+	marketSnapshots, candidateOrder := buildMarketSnapshots(ctx, maxPromptMarkets)
+	if marketSnapshots == nil {
+		marketSnapshots = []promptMarket{}
+	}
+
+	return promptSnapshot{
+		Runtime:           runtime,
+		Account:           account,
+		Risk:              risk,
+		Performance:       performance,
+		OpenPositions:     positions,
+		Market:            marketSnapshots,
+		CandidatePriority: candidateOrder,
+		RecentRiskAlerts:  ctx.RecentRiskAlerts,
+		RecentGuardrails:  ctx.RecentGuardrails,
+	}
+}
+
 // buildUserPrompt 构建 User Prompt（动态数据）
 func buildUserPrompt(ctx *Context) string {
+	snapshot := buildPromptSnapshot(ctx)
+	payload, err := json.MarshalIndent(snapshot, "", "  ")
+	if err != nil {
+		payload = []byte("{}")
+	}
+
 	var sb strings.Builder
-
-	// 系统状态
-	sb.WriteString(fmt.Sprintf("**时间**: %s | **周期**: #%d | **运行**: %d分钟\n\n",
-		ctx.CurrentTime, ctx.CallCount, ctx.RuntimeMinutes))
-
-	// BTC 市场
-	if btcData, hasBTC := ctx.MarketDataMap["BTCUSDT"]; hasBTC {
-		btcSummary := fmt.Sprintf("**BTC**: %.2f (15m: %+.2f%% | 1h: %+.2f%% | 4h: %+.2f%%)",
-			btcData.CurrentPrice, btcData.PriceChange15m, btcData.PriceChange1h, btcData.PriceChange4h)
-
-		details := make([]string, 0, 4)
-		if btcData.HourlyContext != nil {
-			if len(btcData.HourlyContext.RSI14Series) > 0 {
-				details = append(details, fmt.Sprintf("1h RSI14 %.2f", btcData.HourlyContext.RSI14))
-			}
-			if len(btcData.HourlyContext.MACDSeries) > 0 {
-				details = append(details, fmt.Sprintf("1h MACD %.3f", btcData.HourlyContext.MACD))
-			}
-		}
-		if btcData.LongerTermContext != nil {
-			details = append(details, fmt.Sprintf("4h EMA20 %.2f vs EMA50 %.2f",
-				btcData.LongerTermContext.EMA20, btcData.LongerTermContext.EMA50))
-			if len(btcData.LongerTermContext.MACDValues) > 0 {
-				macd4h := btcData.LongerTermContext.MACDValues[len(btcData.LongerTermContext.MACDValues)-1]
-				details = append(details, fmt.Sprintf("4h MACD %.3f", macd4h))
-			}
-		}
-		if len(details) > 0 {
-			btcSummary += " | " + strings.Join(details, " | ")
-		}
-		btcSummary += fmt.Sprintf(" | 3m MACD %.4f | 3m RSI7 %.2f\n\n",
-			btcData.CurrentMACD, btcData.CurrentRSI7)
-
-		sb.WriteString(btcSummary)
-	}
-
-	// 账户
-	sb.WriteString(fmt.Sprintf("**账户**: 净值%.2f | 余额%.2f (%.1f%%) | 盈亏%+.2f%% | 保证金%.1f%% | 持仓%d个\n\n",
-		ctx.Account.TotalEquity,
-		ctx.Account.AvailableBalance,
-		(ctx.Account.AvailableBalance/ctx.Account.TotalEquity)*100,
-		ctx.Account.TotalPnLPct,
-		ctx.Account.MarginUsedPct,
-		ctx.Account.PositionCount))
-
-	// 持仓（完整市场数据）
-	if len(ctx.Positions) > 0 {
-		sb.WriteString("## 当前持仓\n")
-		for i, pos := range ctx.Positions {
-			// 计算持仓时长
-			holdingDuration := ""
-			if pos.UpdateTime > 0 {
-				durationMs := time.Now().UnixMilli() - pos.UpdateTime
-				durationMin := durationMs / (1000 * 60) // 转换为分钟
-				if durationMin < 60 {
-					holdingDuration = fmt.Sprintf(" | 持仓时长%d分钟", durationMin)
-				} else {
-					durationHour := durationMin / 60
-					durationMinRemainder := durationMin % 60
-					holdingDuration = fmt.Sprintf(" | 持仓时长%d小时%d分钟", durationHour, durationMinRemainder)
-				}
-			}
-
-			sb.WriteString(fmt.Sprintf("%d. %s %s | 入场价%.4f 当前价%.4f | 盈亏%+.2f%% | 杠杆%dx | 保证金%.0f | 强平价%.4f%s\n\n",
-				i+1, pos.Symbol, strings.ToUpper(pos.Side),
-				pos.EntryPrice, pos.MarkPrice, pos.UnrealizedPnLPct,
-				pos.Leverage, pos.MarginUsed, pos.LiquidationPrice, holdingDuration))
-
-			// 使用FormatMarketData输出完整市场数据
-			if marketData, ok := ctx.MarketDataMap[pos.Symbol]; ok {
-				sb.WriteString(market.Format(marketData))
-				sb.WriteString("\n")
-			}
-		}
-	} else {
-		sb.WriteString("**当前持仓**: 无\n\n")
-	}
-
-	// 候选币种（完整市场数据）
-	sb.WriteString(fmt.Sprintf("## 候选币种 (%d个)\n\n", len(ctx.MarketDataMap)))
-	displayedCount := 0
-	for _, coin := range ctx.CandidateCoins {
-		marketData, hasData := ctx.MarketDataMap[coin.Symbol]
-		if !hasData {
-			continue
-		}
-		displayedCount++
-
-		sourceTags := ""
-		if len(coin.Sources) > 1 {
-			sourceTags = " (AI500+OI_Top双重信号)"
-		} else if len(coin.Sources) == 1 && coin.Sources[0] == "oi_top" {
-			sourceTags = " (OI_Top持仓增长)"
-		}
-
-		// 使用FormatMarketData输出完整市场数据
-		sb.WriteString(fmt.Sprintf("### %d. %s%s\n\n", displayedCount, coin.Symbol, sourceTags))
-		sb.WriteString(market.Format(marketData))
-		sb.WriteString("\n")
-	}
-	sb.WriteString("\n")
-
-	// 夏普比率（直接传值，不要复杂格式化）
-	if ctx.Performance != nil {
-		// 直接从interface{}中提取SharpeRatio
-		type PerformanceData struct {
-			SharpeRatio float64 `json:"sharpe_ratio"`
-		}
-		var perfData PerformanceData
-		if jsonData, err := json.Marshal(ctx.Performance); err == nil {
-			if err := json.Unmarshal(jsonData, &perfData); err == nil {
-				sb.WriteString(fmt.Sprintf("## 📊 夏普比率: %.2f\n\n", perfData.SharpeRatio))
-			}
-		}
-	}
-
-	sb.WriteString("---\n\n")
-	sb.WriteString("现在请分析并输出决策（思维链 + JSON）\n")
+	sb.WriteString("解析以下结构化快照，结合系统提示词中的约束，产出最优交易决策：\n\n")
+	sb.WriteString("```json\n")
+	sb.Write(payload)
+	sb.WriteString("\n```\n\n")
+	sb.WriteString("请先输出你的推理过程（思维链），随后给出严格符合指定字段的 JSON 决策数组。\n")
 
 	return sb.String()
+}
+
+func buildPerformanceSnapshot(raw interface{}) *promptPerformance {
+	if raw == nil {
+		return nil
+	}
+
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+
+	type rawRecentTrade struct {
+		Symbol      string  `json:"symbol"`
+		Side        string  `json:"side"`
+		PnL         float64 `json:"pn_l"`
+		PnLPct      float64 `json:"pn_l_pct"`
+		Duration    string  `json:"duration"`
+		WasStopLoss bool    `json:"was_stop_loss"`
+	}
+
+	type rawPerformance struct {
+		SharpeRatio  float64          `json:"sharpe_ratio"`
+		TotalTrades  int              `json:"total_trades"`
+		WinRate      float64          `json:"win_rate"`
+		ProfitFactor float64          `json:"profit_factor"`
+		AvgWin       float64          `json:"avg_win"`
+		AvgLoss      float64          `json:"avg_loss"`
+		BestSymbol   string           `json:"best_symbol"`
+		WorstSymbol  string           `json:"worst_symbol"`
+		RecentTrades []rawRecentTrade `json:"recent_trades"`
+	}
+
+	var perf rawPerformance
+	if err := json.Unmarshal(data, &perf); err != nil {
+		return nil
+	}
+
+	result := &promptPerformance{
+		SharpeRatio:  perf.SharpeRatio,
+		TotalTrades:  perf.TotalTrades,
+		WinRate:      perf.WinRate,
+		ProfitFactor: perf.ProfitFactor,
+		AvgWin:       perf.AvgWin,
+		AvgLoss:      perf.AvgLoss,
+		BestSymbol:   perf.BestSymbol,
+		WorstSymbol:  perf.WorstSymbol,
+	}
+
+	if len(perf.RecentTrades) > 0 {
+		limit := maxRecentTradesInPrompt
+		if len(perf.RecentTrades) < limit {
+			limit = len(perf.RecentTrades)
+		}
+		result.RecentTrades = make([]promptRecentTrade, 0, limit)
+		for i := 0; i < limit; i++ {
+			trade := perf.RecentTrades[i]
+			result.RecentTrades = append(result.RecentTrades, promptRecentTrade{
+				Symbol:      trade.Symbol,
+				Side:        trade.Side,
+				PnL:         trade.PnL,
+				PnLPct:      trade.PnLPct,
+				Duration:    trade.Duration,
+				StopLossHit: trade.WasStopLoss,
+			})
+		}
+	}
+
+	return result
+}
+
+func buildOpenPositionsSnapshot(ctx *Context) []promptPosition {
+	if len(ctx.Positions) == 0 {
+		return nil
+	}
+
+	positions := make([]promptPosition, 0, len(ctx.Positions))
+	for _, pos := range ctx.Positions {
+		positionValue := pos.Quantity * pos.MarkPrice
+		positions = append(positions, promptPosition{
+			Symbol:           pos.Symbol,
+			Side:             pos.Side,
+			EntryPrice:       pos.EntryPrice,
+			MarkPrice:        pos.MarkPrice,
+			Leverage:         pos.Leverage,
+			Quantity:         pos.Quantity,
+			PositionValue:    positionValue,
+			MarginUsed:       pos.MarginUsed,
+			UnrealizedPnLPct: pos.UnrealizedPnLPct,
+			LiquidationPrice: pos.LiquidationPrice,
+			HoldMinutes:      deriveHoldMinutes(pos.UpdateTime),
+		})
+	}
+
+	return positions
+}
+
+func deriveHoldMinutes(updateTime int64) int {
+	if updateTime <= 0 {
+		return 0
+	}
+	now := time.Now().UnixMilli()
+	if now <= updateTime {
+		return 0
+	}
+	return int((now - updateTime) / (1000 * 60))
+}
+
+func buildMarketSnapshots(ctx *Context, limit int) ([]promptMarket, []string) {
+	candidateSources := make(map[string][]string, len(ctx.CandidateCoins))
+	for _, coin := range ctx.CandidateCoins {
+		candidateSources[coin.Symbol] = append([]string{}, coin.Sources...)
+	}
+
+	ordered := make([]string, 0, len(ctx.Positions)+len(ctx.CandidateCoins))
+	seen := make(map[string]bool)
+
+	for _, pos := range ctx.Positions {
+		if !seen[pos.Symbol] {
+			ordered = append(ordered, pos.Symbol)
+			seen[pos.Symbol] = true
+		}
+	}
+
+	for _, coin := range ctx.CandidateCoins {
+		if !seen[coin.Symbol] {
+			ordered = append(ordered, coin.Symbol)
+			seen[coin.Symbol] = true
+		}
+	}
+
+	if limit <= 0 {
+		limit = len(ordered)
+	}
+
+	snapshots := make([]promptMarket, 0, minInt(limit, len(ordered)))
+	for _, symbol := range ordered {
+		if len(snapshots) >= limit {
+			break
+		}
+		data, ok := ctx.MarketDataMap[symbol]
+		if !ok || data == nil {
+			continue
+		}
+
+		sources := append([]string{}, candidateSources[symbol]...)
+		if hasOpenPosition(ctx.Positions, symbol) {
+			sources = appendIfMissing(sources, "open_position")
+		}
+
+		snapshots = append(snapshots, buildMarketSnapshot(symbol, data, sources))
+	}
+
+	return snapshots, ordered
+}
+
+func buildMarketSnapshot(symbol string, data *market.Data, sources []string) promptMarket {
+	snapshot := promptMarket{
+		Symbol:    symbol,
+		Sources:   sources,
+		TrendBias: deriveTrendBias(data),
+		Price:     data.CurrentPrice,
+		ChangePct: map[string]float64{
+			"15m": data.PriceChange15m,
+			"1h":  data.PriceChange1h,
+			"4h":  data.PriceChange4h,
+		},
+		MomentumBias: map[string]string{
+			"15m": classifyMomentum(data.PriceChange15m),
+			"1h":  classifyMomentum(data.PriceChange1h),
+			"4h":  classifyMomentum(data.PriceChange4h),
+		},
+		FundingRate: data.FundingRate,
+	}
+
+	if data.OpenInterest != nil {
+		ratio := 0.0
+		if data.OpenInterest.Average > 0 {
+			ratio = data.OpenInterest.Latest / data.OpenInterest.Average
+		}
+		snapshot.OpenInterest = &promptOpenInterest{
+			Latest:  data.OpenInterest.Latest,
+			Average: data.OpenInterest.Average,
+			Ratio:   ratio,
+		}
+	}
+
+	if data.LongerTermContext != nil {
+		atrPct := 0.0
+		if data.CurrentPrice > 0 {
+			atrPct = (data.LongerTermContext.ATR14 / data.CurrentPrice) * 100
+		}
+
+		snapshot.Volatility = &promptVolatility{
+			ATR3:     data.LongerTermContext.ATR3,
+			ATR14:    data.LongerTermContext.ATR14,
+			ATR14Pct: atrPct,
+		}
+
+		snapshot.H4 = &promptTimeframe{
+			EMA20: data.LongerTermContext.EMA20,
+			EMA50: data.LongerTermContext.EMA50,
+			MACD:  lastFloat(data.LongerTermContext.MACDValues),
+			RSI14: lastFloat(data.LongerTermContext.RSI14Values),
+		}
+		snapshot.H4.TrendBias = deriveTimeframeTrendBias(snapshot.H4)
+	}
+
+	if data.HourlyContext != nil {
+		snapshot.H1 = &promptTimeframe{
+			EMA20: data.HourlyContext.EMA20,
+			EMA50: data.HourlyContext.EMA50,
+			MACD:  data.HourlyContext.MACD,
+			RSI14: data.HourlyContext.RSI14,
+		}
+		snapshot.H1.TrendBias = deriveTimeframeTrendBias(snapshot.H1)
+	}
+
+	if data.IntradaySeries != nil {
+		snapshot.Intraday = &promptIntraday{
+			MACD:       lastFloat(data.IntradaySeries.MACDValues),
+			RSI7:       lastFloat(data.IntradaySeries.RSI7Values),
+			PriceSlope: calcPriceSlope(data.IntradaySeries.MidPrices),
+		}
+	}
+
+	snapshot.ConfidenceFlags = collectConfidenceFlags(data, snapshot)
+
+	if guardrails := GuardrailWarningsForMarket(data); len(guardrails) > 0 {
+		snapshot.GuardrailWarnings = guardrails
+	}
+
+	return snapshot
+}
+
+func deriveTrendBias(data *market.Data) string {
+	if data.LongerTermContext != nil {
+		lastMACD := lastFloat(data.LongerTermContext.MACDValues)
+		if data.LongerTermContext.EMA20 > data.LongerTermContext.EMA50 && lastMACD >= 0 {
+			return "bullish"
+		}
+		if data.LongerTermContext.EMA20 < data.LongerTermContext.EMA50 && lastMACD <= 0 {
+			return "bearish"
+		}
+	}
+
+	if data.HourlyContext != nil {
+		if data.HourlyContext.EMA20 > data.HourlyContext.EMA50 && data.HourlyContext.MACD >= 0 {
+			return "bullish"
+		}
+		if data.HourlyContext.EMA20 < data.HourlyContext.EMA50 && data.HourlyContext.MACD <= 0 {
+			return "bearish"
+		}
+	}
+
+	if data.CurrentPrice > data.CurrentEMA20 {
+		return "bullish"
+	}
+	if data.CurrentPrice < data.CurrentEMA20 {
+		return "bearish"
+	}
+
+	return "range"
+}
+
+func deriveTimeframeTrendBias(tf *promptTimeframe) string {
+	if tf == nil {
+		return ""
+	}
+	if tf.EMA20 > tf.EMA50 && tf.MACD >= 0 {
+		return "bullish"
+	}
+	if tf.EMA20 < tf.EMA50 && tf.MACD <= 0 {
+		return "bearish"
+	}
+	return "range"
+}
+
+func classifyMomentum(change float64) string {
+	switch {
+	case change >= 1.5:
+		return "strong_up"
+	case change >= 0.2:
+		return "up"
+	case change <= -1.5:
+		return "strong_down"
+	case change <= -0.2:
+		return "down"
+	default:
+		return "flat"
+	}
+}
+
+func calcPriceSlope(series []float64) float64 {
+	if len(series) < 2 {
+		return 0
+	}
+	latest := series[len(series)-1]
+	prev := series[len(series)-2]
+	if prev == 0 {
+		return 0
+	}
+	return ((latest - prev) / prev) * 100
+}
+
+func lastFloat(values []float64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	return values[len(values)-1]
+}
+
+func collectConfidenceFlags(data *market.Data, snapshot promptMarket) []string {
+	flags := make([]string, 0, 6)
+
+	if snapshot.TrendBias == "bullish" && snapshot.H1 != nil && snapshot.H1.TrendBias == "bullish" {
+		flags = append(flags, "multi_tf_bullish")
+	}
+	if snapshot.TrendBias == "bearish" && snapshot.H1 != nil && snapshot.H1.TrendBias == "bearish" {
+		flags = append(flags, "multi_tf_bearish")
+	}
+
+	if data.CurrentMACD > 0 {
+		flags = append(flags, "macd_positive_3m")
+	} else if data.CurrentMACD < 0 {
+		flags = append(flags, "macd_negative_3m")
+	}
+
+	if data.CurrentRSI7 >= 70 {
+		flags = append(flags, "rsi7_overbought")
+	} else if data.CurrentRSI7 <= 30 {
+		flags = append(flags, "rsi7_oversold")
+	}
+
+	if snapshot.OpenInterest != nil {
+		switch {
+		case snapshot.OpenInterest.Ratio >= 1.1:
+			flags = append(flags, "oi_expanding")
+		case snapshot.OpenInterest.Ratio > 0 && snapshot.OpenInterest.Ratio <= 0.9:
+			flags = append(flags, "oi_contracting")
+		}
+	}
+
+	return flags
+}
+
+func appendGuardrailHistory(history []MarketGuardrailWarning, additions ...MarketGuardrailWarning) []MarketGuardrailWarning {
+	if len(additions) == 0 {
+		return history
+	}
+	for _, item := range additions {
+		normalized := item
+		if normalized.Severity == "" {
+			normalized.Severity = "low"
+		}
+		history = append(history, normalized)
+		if len(history) > MaxRecentGuardrailSnapshots {
+			history = history[len(history)-MaxRecentGuardrailSnapshots:]
+		}
+	}
+	return history
+}
+
+func hasHighSeverityGuardrail(warnings []MarketGuardrailWarning) bool {
+	for _, warn := range warnings {
+		if strings.EqualFold(warn.Severity, "high") {
+			return true
+		}
+	}
+	return false
+}
+
+func summarizeGuardrails(warnings []MarketGuardrailWarning) string {
+	if len(warnings) == 0 {
+		return ""
+	}
+	codes := make([]string, 0, len(warnings))
+	for _, warn := range warnings {
+		entry := warn.Code
+		if warn.Detail != "" {
+			entry = fmt.Sprintf("%s(%s)", warn.Code, warn.Detail)
+		}
+		codes = append(codes, entry)
+	}
+	return strings.Join(codes, "; ")
+}
+
+// GuardrailWarningsForMarket 生成市场硬性约束提示
+func GuardrailWarningsForMarket(data *market.Data) []MarketGuardrailWarning {
+	warnings := make([]MarketGuardrailWarning, 0, 4)
+	if data == nil {
+		return warnings
+	}
+
+	if data.CurrentPrice > 0 && data.CurrentPrice < 0.05 {
+		warnings = append(warnings, MarketGuardrailWarning{
+			Code:     "low_unit_price",
+			Severity: "medium",
+			Detail:   fmt.Sprintf("symbol price %.5f < 0.05, 价格过低易受滑点影响", data.CurrentPrice),
+		})
+	}
+
+	if data.LongerTermContext != nil && data.CurrentPrice > 0 {
+		atrPct := (data.LongerTermContext.ATR14 / data.CurrentPrice) * 100
+		if atrPct < 0.5 {
+			warnings = append(warnings, MarketGuardrailWarning{
+				Code:     "low_volatility_atr14",
+				Severity: "low",
+				Detail:   fmt.Sprintf("ATR14 %.4f -> %.2f%%，波动过低", data.LongerTermContext.ATR14, atrPct),
+			})
+		}
+		if atrPct > 12 {
+			warnings = append(warnings, MarketGuardrailWarning{
+				Code:     "extreme_volatility_atr14",
+				Severity: "high",
+				Detail:   fmt.Sprintf("ATR14 %.4f -> %.2f%%，波动过大", data.LongerTermContext.ATR14, atrPct),
+			})
+		}
+	}
+
+	if math.Abs(data.FundingRate) >= 0.00075 {
+		warnings = append(warnings, MarketGuardrailWarning{
+			Code:     "funding_extreme",
+			Severity: "high",
+			Detail:   fmt.Sprintf("funding_rate %.5f，资金费率异常", data.FundingRate),
+		})
+	}
+
+	if data.OpenInterest != nil && data.OpenInterest.Average > 0 {
+		oiRatio := data.OpenInterest.Latest / data.OpenInterest.Average
+		if oiRatio <= 0.85 {
+			warnings = append(warnings, MarketGuardrailWarning{
+				Code:     "open_interest_contracting",
+				Severity: "medium",
+				Detail:   fmt.Sprintf("oi_ratio %.2f，持仓量显著下降", oiRatio),
+			})
+		}
+	}
+
+	if math.Abs(data.PriceChange4h) >= 8 {
+		warnings = append(warnings, MarketGuardrailWarning{
+			Code:     "price_whipsaw_4h",
+			Severity: "medium",
+			Detail:   fmt.Sprintf("4h change %+.2f%%，价格剧烈波动", data.PriceChange4h),
+		})
+	}
+
+	return warnings
+}
+
+func hasOpenPosition(positions []PositionInfo, symbol string) bool {
+	for _, pos := range positions {
+		if pos.Symbol == symbol {
+			return true
+		}
+	}
+	return false
+}
+
+func appendIfMissing(items []string, candidate string) []string {
+	for _, item := range items {
+		if item == candidate {
+			return items
+		}
+	}
+	return append(items, candidate)
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // parseFullDecisionResponse 解析AI的完整决策响应

@@ -287,14 +287,14 @@ func (at *AutoTrader) runCycle() error {
 
 	// 4. 调用AI获取完整决策
 	log.Println("🤖 正在请求AI分析并决策...")
-	decision, err := decision.GetFullDecision(ctx, at.mcpClient)
+	fullDecision, err := decision.GetFullDecision(ctx, at.mcpClient)
 
 	// 即使有错误，也保存思维链、决策和输入prompt（用于debug）
-	if decision != nil {
-		record.InputPrompt = decision.UserPrompt
-		record.CoTTrace = decision.CoTTrace
-		if len(decision.Decisions) > 0 {
-			decisionJSON, _ := json.MarshalIndent(decision.Decisions, "", "  ")
+	if fullDecision != nil {
+		record.InputPrompt = fullDecision.UserPrompt
+		record.CoTTrace = fullDecision.CoTTrace
+		if len(fullDecision.Decisions) > 0 {
+			decisionJSON, _ := json.MarshalIndent(fullDecision.Decisions, "", "  ")
 			record.DecisionJSON = string(decisionJSON)
 		}
 	}
@@ -304,11 +304,11 @@ func (at *AutoTrader) runCycle() error {
 		record.ErrorMessage = fmt.Sprintf("获取AI决策失败: %v", err)
 
 		// 打印AI思维链（即使有错误）
-		if decision != nil && decision.CoTTrace != "" {
+		if fullDecision != nil && fullDecision.CoTTrace != "" {
 			log.Printf("\n" + strings.Repeat("-", 70))
 			log.Println("💭 AI思维链分析（错误情况）:")
 			log.Println(strings.Repeat("-", 70))
-			log.Println(decision.CoTTrace)
+			log.Println(fullDecision.CoTTrace)
 			log.Printf(strings.Repeat("-", 70) + "\n")
 		}
 
@@ -316,16 +316,85 @@ func (at *AutoTrader) runCycle() error {
 		return fmt.Errorf("获取AI决策失败: %w", err)
 	}
 
+	// 输出市场 guardrail 提示，便于执行前人工复核
+	hasGuardrailWarnings := false
+	for _, d := range fullDecision.Decisions {
+		if !isOpenAction(d.Action) {
+			continue
+		}
+		if data, ok := ctx.MarketDataMap[d.Symbol]; ok {
+			if warnings := decision.GuardrailWarningsForMarket(data); len(warnings) > 0 {
+				if !hasGuardrailWarnings {
+					log.Println("🧭 市场硬约束提示（资格检查）：")
+					hasGuardrailWarnings = true
+				}
+				for _, warn := range warnings {
+					log.Printf("    - [%s %s] %s (%s) <%s>", d.Symbol, d.Action, warn.Code, warn.Detail, warn.Severity)
+					severity := warn.Severity
+					if severity == "" {
+						severity = "low"
+					}
+					record.RiskFlags = append(record.RiskFlags, logger.RiskEvent{
+						Symbol:   d.Symbol,
+						Action:   d.Action,
+						Issue:    "market_guardrail_" + warn.Code,
+						Severity: severity,
+						Detail:   warn.Detail,
+					})
+				}
+				record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("🧭 %s %s guardrails: %d 条提示", d.Symbol, d.Action, len(warnings)))
+			}
+		}
+	}
+
+	// 风控复核：检测高风险操作
+	riskFlags := at.generateRiskFlags(ctx, fullDecision.Decisions)
+	if len(riskFlags) > 0 {
+		log.Printf("🛡 检测到 %d 条风险告警，启动风控复核流程...", len(riskFlags))
+		for _, flag := range riskFlags {
+			log.Printf("    - [%s %s] %s (%s) <%s>", flag.Symbol, flag.Action, flag.Issue, flag.Detail, flag.Severity)
+			record.RiskFlags = append(record.RiskFlags, logger.RiskEvent{
+				Symbol:   flag.Symbol,
+				Action:   flag.Action,
+				Issue:    flag.Issue,
+				Severity: flag.Severity,
+				Detail:   flag.Detail,
+			})
+		}
+		record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("🛡 风控复核触发：%d 条告警", len(riskFlags)))
+
+		reviewedDecision, reviewErr := decision.ReviewDecisions(ctx, fullDecision, riskFlags, at.mcpClient)
+		if reviewErr != nil {
+			log.Printf("⚠ 风控复核失败，保留原始决策: %v", reviewErr)
+			record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("⚠ 风控复核失败: %v", reviewErr))
+		} else {
+			fullDecision = reviewedDecision
+			record.ExecutionLog = append(record.ExecutionLog, "🛡 风控复核完成，决策已根据风险告警更新")
+		}
+	}
+
+	// 使用最新的决策内容更新记录
+	if fullDecision != nil {
+		record.InputPrompt = fullDecision.UserPrompt
+		record.CoTTrace = fullDecision.CoTTrace
+		if len(fullDecision.Decisions) > 0 {
+			decisionJSON, _ := json.MarshalIndent(fullDecision.Decisions, "", "  ")
+			record.DecisionJSON = string(decisionJSON)
+		} else {
+			record.DecisionJSON = ""
+		}
+	}
+
 	// 5. 打印AI思维链
 	log.Printf("\n" + strings.Repeat("-", 70))
 	log.Println("💭 AI思维链分析:")
 	log.Println(strings.Repeat("-", 70))
-	log.Println(decision.CoTTrace)
+	log.Println(fullDecision.CoTTrace)
 	log.Printf(strings.Repeat("-", 70) + "\n")
 
 	// 6. 打印AI决策
-	log.Printf("📋 AI决策列表 (%d 个):\n", len(decision.Decisions))
-	for i, d := range decision.Decisions {
+	log.Printf("📋 AI决策列表 (%d 个):\n", len(fullDecision.Decisions))
+	for i, d := range fullDecision.Decisions {
 		log.Printf("  [%d] %s: %s - %s", i+1, d.Symbol, d.Action, d.Reasoning)
 		if d.Action == "open_long" || d.Action == "open_short" {
 			log.Printf("      杠杆: %dx | 仓位: %.2f USDT | 止损: %.4f | 止盈: %.4f",
@@ -335,7 +404,7 @@ func (at *AutoTrader) runCycle() error {
 	log.Println()
 
 	// 7. 对决策排序：确保先平仓后开仓（防止仓位叠加超限）
-	sortedDecisions := sortDecisionsByPriority(decision.Decisions)
+	sortedDecisions := sortDecisionsByPriority(fullDecision.Decisions)
 
 	log.Println("🔄 执行顺序（已优化）: 先平仓→后开仓")
 	for i, d := range sortedDecisions {
@@ -519,6 +588,41 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		performance = nil
 	}
 
+	recentRiskAlerts := make([]decision.RiskFlag, 0)
+	recentGuardrails := make([]decision.MarketGuardrailWarning, 0)
+	if records, err := at.decisionLogger.GetLatestRecords(5); err == nil {
+		for _, rec := range records {
+			for _, evt := range rec.RiskFlags {
+				riskFlag := decision.RiskFlag{
+					Symbol:   evt.Symbol,
+					Action:   evt.Action,
+					Issue:    evt.Issue,
+					Severity: evt.Severity,
+					Detail:   evt.Detail,
+				}
+
+				if strings.HasPrefix(evt.Issue, "market_guardrail_") {
+					code := strings.TrimPrefix(evt.Issue, "market_guardrail_")
+					recentGuardrails = append(recentGuardrails, decision.MarketGuardrailWarning{
+						Code:     code,
+						Severity: evt.Severity,
+						Detail:   evt.Detail,
+					})
+				} else {
+					recentRiskAlerts = append(recentRiskAlerts, riskFlag)
+				}
+			}
+		}
+	}
+
+	limit := decision.MaxRecentGuardrailSnapshots
+	if len(recentRiskAlerts) > limit {
+		recentRiskAlerts = recentRiskAlerts[len(recentRiskAlerts)-limit:]
+	}
+	if len(recentGuardrails) > limit {
+		recentGuardrails = recentGuardrails[len(recentGuardrails)-limit:]
+	}
+
 	// 6. 构建上下文
 	ctx := &decision.Context{
 		CurrentTime:     time.Now().Format("2006-01-02 15:04:05"),
@@ -535,12 +639,176 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 			MarginUsedPct:    marginUsedPct,
 			PositionCount:    len(positionInfos),
 		},
-		Positions:      positionInfos,
-		CandidateCoins: candidateCoins,
-		Performance:    performance, // 添加历史表现分析
+		Positions:        positionInfos,
+		CandidateCoins:   candidateCoins,
+		Performance:      performance, // 添加历史表现分析
+		RecentRiskAlerts: recentRiskAlerts,
+		RecentGuardrails: recentGuardrails,
 	}
 
 	return ctx, nil
+}
+
+func (at *AutoTrader) generateRiskFlags(ctx *decision.Context, decisions []decision.Decision) []decision.RiskFlag {
+	flags := make([]decision.RiskFlag, 0)
+
+	const maxPositions = 3
+	openSlots := maxPositions - ctx.Account.PositionCount
+	if openSlots < 0 {
+		openSlots = 0
+	}
+
+	riskBudget := ctx.Account.TotalEquity * 0.03
+	marginUsed := ctx.Account.MarginUsedPct
+	marginHeadroom := 90 - marginUsed
+
+	openActions := 0
+	for _, d := range decisions {
+		if isOpenAction(d.Action) {
+			openActions++
+		}
+	}
+
+	if openActions > openSlots {
+		for _, d := range decisions {
+			if isOpenAction(d.Action) {
+				flags = appendRiskFlagOnce(flags, decision.RiskFlag{
+					Symbol:   d.Symbol,
+					Action:   d.Action,
+					Issue:    "position_slot_exceeded",
+					Severity: "high",
+					Detail:   fmt.Sprintf("open_slots=%d, requested_opens=%d", openSlots, openActions),
+				})
+			}
+		}
+	}
+
+	sharpe, hasSharpe := extractSharpeRatio(ctx.Performance)
+
+	for _, d := range decisions {
+		if !isOpenAction(d.Action) {
+			continue
+		}
+
+		if riskBudget > 0 && d.RiskUSD > riskBudget*1.05 {
+			flags = appendRiskFlagOnce(flags, decision.RiskFlag{
+				Symbol:   d.Symbol,
+				Action:   d.Action,
+				Issue:    "risk_budget_exceeded",
+				Severity: "high",
+				Detail:   fmt.Sprintf("risk_usd %.2f > allowed %.2f", d.RiskUSD, riskBudget),
+			})
+		}
+
+		if data, ok := ctx.MarketDataMap[d.Symbol]; ok {
+			for _, guard := range decision.GuardrailWarningsForMarket(data) {
+				if guard.Severity == "low" {
+					continue
+				}
+				detail := guard.Detail
+				if detail == "" {
+					detail = "deterministic guardrail triggered"
+				}
+				flags = appendRiskFlagOnce(flags, decision.RiskFlag{
+					Symbol:   d.Symbol,
+					Action:   d.Action,
+					Issue:    "market_guardrail_" + guard.Code,
+					Severity: guard.Severity,
+					Detail:   detail,
+				})
+			}
+		}
+
+		if marginUsed >= 90 {
+			flags = appendRiskFlagOnce(flags, decision.RiskFlag{
+				Symbol:   d.Symbol,
+				Action:   d.Action,
+				Issue:    "margin_usage_critical",
+				Severity: "high",
+				Detail:   fmt.Sprintf("margin_used_pct %.1f >= 90%%", marginUsed),
+			})
+		} else if marginUsed >= 85 {
+			flags = appendRiskFlagOnce(flags, decision.RiskFlag{
+				Symbol:   d.Symbol,
+				Action:   d.Action,
+				Issue:    "margin_usage_high",
+				Severity: "medium",
+				Detail:   fmt.Sprintf("margin_used_pct %.1f >= 85%%", marginUsed),
+			})
+		}
+
+		if marginHeadroom <= 5 {
+			flags = appendRiskFlagOnce(flags, decision.RiskFlag{
+				Symbol:   d.Symbol,
+				Action:   d.Action,
+				Issue:    "margin_headroom_low",
+				Severity: "medium",
+				Detail:   fmt.Sprintf("margin_headroom_pct %.1f <= 5%%", marginHeadroom),
+			})
+		}
+
+		if d.Confidence > 0 && d.Confidence < 75 {
+			flags = appendRiskFlagOnce(flags, decision.RiskFlag{
+				Symbol:   d.Symbol,
+				Action:   d.Action,
+				Issue:    "confidence_too_low",
+				Severity: "medium",
+				Detail:   fmt.Sprintf("confidence %d < 75", d.Confidence),
+			})
+		}
+
+		if hasSharpe {
+			if sharpe < -0.5 {
+				flags = appendRiskFlagOnce(flags, decision.RiskFlag{
+					Symbol:   d.Symbol,
+					Action:   d.Action,
+					Issue:    "strategy_in_drawdown",
+					Severity: "high",
+					Detail:   fmt.Sprintf("sharpe_ratio %.2f < -0.5，需要暂停新增仓位", sharpe),
+				})
+			} else if sharpe < 0 {
+				flags = appendRiskFlagOnce(flags, decision.RiskFlag{
+					Symbol:   d.Symbol,
+					Action:   d.Action,
+					Issue:    "strategy_underperforming",
+					Severity: "medium",
+					Detail:   fmt.Sprintf("sharpe_ratio %.2f < 0，仅允许高置信度交易", sharpe),
+				})
+			}
+		}
+	}
+
+	return flags
+}
+
+func extractSharpeRatio(performance interface{}) (float64, bool) {
+	if performance == nil {
+		return 0, false
+	}
+	data, err := json.Marshal(performance)
+	if err != nil {
+		return 0, false
+	}
+	var payload struct {
+		SharpeRatio float64 `json:"sharpe_ratio"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return 0, false
+	}
+	return payload.SharpeRatio, true
+}
+
+func isOpenAction(action string) bool {
+	return action == "open_long" || action == "open_short"
+}
+
+func appendRiskFlagOnce(flags []decision.RiskFlag, flag decision.RiskFlag) []decision.RiskFlag {
+	for _, existing := range flags {
+		if existing.Symbol == flag.Symbol && existing.Action == flag.Action && existing.Issue == flag.Issue {
+			return flags
+		}
+	}
+	return append(flags, flag)
 }
 
 // executeDecisionWithRecord 执行AI决策并记录详细信息

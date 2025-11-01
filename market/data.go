@@ -697,11 +697,31 @@ func formatFloatSlice(values []float64) string {
 
 // Normalize 标准化symbol,确保是USDT交易对
 func Normalize(symbol string) string {
+	symbol = strings.TrimSpace(symbol)
 	symbol = strings.ToUpper(symbol)
-	if strings.HasSuffix(symbol, "USDT") {
-		return symbol
+	symbol = stripNonAlphanumeric(symbol)
+	if !strings.HasSuffix(symbol, "USDT") {
+		symbol += "USDT"
 	}
-	return symbol + "USDT"
+	return symbol
+}
+
+// stripNonAlphanumeric 去除非字母数字字符，兼容 "BTC/USDT" 等写法
+func stripNonAlphanumeric(s string) string {
+	var builder strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		isDigit := c >= '0' && c <= '9'
+		isUpper := c >= 'A' && c <= 'Z'
+		if isDigit || isUpper {
+			builder.WriteByte(c)
+			continue
+		}
+		if c >= 'a' && c <= 'z' {
+			builder.WriteByte(c - 'a' + 'A')
+		}
+	}
+	return builder.String()
 }
 
 // parseFloat 解析float值
