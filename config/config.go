@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -11,7 +12,7 @@ import (
 type TraderConfig struct {
 	ID      string `json:"id"`
 	Name    string `json:"name"`
-	Enabled bool   `json:"enabled"` // 是否启用该trader
+	Enabled bool   `json:"enabled"`  // 是否启用该trader
 	AIModel string `json:"ai_model"` // "qwen" or "deepseek"
 
 	// 交易平台选择（二选一）
@@ -36,9 +37,11 @@ type TraderConfig struct {
 	DeepSeekKey string `json:"deepseek_key,omitempty"`
 
 	// 自定义AI API配置（支持任何OpenAI格式的API）
-	CustomAPIURL    string `json:"custom_api_url,omitempty"`
-	CustomAPIKey    string `json:"custom_api_key,omitempty"`
-	CustomModelName string `json:"custom_model_name,omitempty"`
+	CustomAPIURL         string `json:"custom_api_url,omitempty"`
+	CustomAPIKey         string `json:"custom_api_key,omitempty"`
+	CustomModelName      string `json:"custom_model_name,omitempty"`
+	CustomAPIHTTPReferer string `json:"custom_api_http_referer,omitempty"`
+	CustomAPIXTitle      string `json:"custom_api_x_title,omitempty"`
 
 	InitialBalance      float64 `json:"initial_balance"`
 	ScanIntervalMinutes int     `json:"scan_interval_minutes"`
@@ -164,6 +167,11 @@ func (c *Config) Validate() error {
 			}
 			if trader.CustomModelName == "" {
 				return fmt.Errorf("trader[%d]: 使用自定义API时必须配置custom_model_name", i)
+			}
+			if strings.Contains(trader.CustomAPIURL, "openrouter.ai") {
+				if trader.CustomAPIHTTPReferer == "" && trader.CustomAPIXTitle == "" {
+					return fmt.Errorf("trader[%d]: 使用OpenRouter时必须至少配置custom_api_http_referer或custom_api_x_title", i)
+				}
 			}
 		}
 		if trader.InitialBalance <= 0 {

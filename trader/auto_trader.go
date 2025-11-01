@@ -47,9 +47,11 @@ type AutoTraderConfig struct {
 	QwenKey     string
 
 	// 自定义AI API配置
-	CustomAPIURL    string
-	CustomAPIKey    string
-	CustomModelName string
+	CustomAPIURL         string
+	CustomAPIKey         string
+	CustomModelName      string
+	CustomAPIHTTPReferer string
+	CustomAPIXTitle      string
 
 	// 扫描配置
 	ScanInterval time.Duration // 扫描间隔（建议3分钟）
@@ -126,6 +128,16 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 	if config.AIModel == "custom" {
 		// 使用自定义API
 		mcpClient.SetCustomAPI(config.CustomAPIURL, config.CustomAPIKey, config.CustomModelName)
+		if config.CustomAPIHTTPReferer != "" || config.CustomAPIXTitle != "" {
+			headers := make(map[string]string, 2)
+			if config.CustomAPIHTTPReferer != "" {
+				headers["HTTP-Referer"] = config.CustomAPIHTTPReferer
+			}
+			if config.CustomAPIXTitle != "" {
+				headers["X-Title"] = config.CustomAPIXTitle
+			}
+			mcpClient.SetExtraHeaders(headers)
+		}
 		log.Printf("🤖 [%s] 使用自定义AI API: %s (模型: %s)", config.Name, config.CustomAPIURL, config.CustomModelName)
 	} else if config.UseQwen || config.AIModel == "qwen" {
 		// 使用Qwen

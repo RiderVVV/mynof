@@ -21,13 +21,14 @@ const (
 
 // Client AI API配置
 type Client struct {
-	Provider   Provider
-	APIKey     string
-	SecretKey  string // 阿里云需要
-	BaseURL    string
-	Model      string
-	Timeout    time.Duration
-	UseFullURL bool // 是否使用完整URL（不添加/chat/completions）
+	Provider     Provider
+	APIKey       string
+	SecretKey    string // 阿里云需要
+	BaseURL      string
+	Model        string
+	Timeout      time.Duration
+	UseFullURL   bool // 是否使用完整URL（不添加/chat/completions）
+	ExtraHeaders map[string]string
 }
 
 func New() *Client {
@@ -74,6 +75,7 @@ func (cfg *Client) SetCustomAPI(apiURL, apiKey, modelName string) {
 
 	cfg.Model = modelName
 	cfg.Timeout = 120 * time.Second
+	cfg.ExtraHeaders = nil
 }
 
 // SetClient 设置完整的AI配置（高级用户）
@@ -82,6 +84,18 @@ func (cfg *Client) SetClient(Client Client) {
 		Client.Timeout = 30 * time.Second
 	}
 	cfg = &Client
+}
+
+// SetExtraHeaders 为自定义API设置额外的HTTP头
+func (cfg *Client) SetExtraHeaders(headers map[string]string) {
+	if len(headers) == 0 {
+		cfg.ExtraHeaders = nil
+		return
+	}
+	cfg.ExtraHeaders = make(map[string]string, len(headers))
+	for k, v := range headers {
+		cfg.ExtraHeaders[k] = v
+	}
 }
 
 // CallWithMessages 使用 system + user prompt 调用AI API（推荐）
@@ -185,6 +199,12 @@ func (cfg *Client) callOnce(systemPrompt, userPrompt string) (string, error) {
 		// 注意：如果使用的不是兼容模式，可能需要不同的认证方式
 	default:
 		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", cfg.APIKey))
+	}
+	for k, v := range cfg.ExtraHeaders {
+		if v == "" {
+			continue
+		}
+		req.Header.Set(k, v)
 	}
 
 	// 发送请求

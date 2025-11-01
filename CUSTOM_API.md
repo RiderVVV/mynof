@@ -43,6 +43,8 @@
 | `custom_api_url` | string | ✅ | API 的 Base URL (不含 `/chat/completions`)。特殊用法：如果以 `#` 结尾，则使用完整 URL（不自动添加路径） |
 | `custom_api_key` | string | ✅ | API 密钥 |
 | `custom_model_name` | string | ✅ | 模型名称 (如 `gpt-4o`, `claude-3-5-sonnet` 等) |
+| `custom_api_http_referer` | string | ⚠️ | OpenRouter 必填项之一：提供可识别应用来源的 URL（与 `custom_api_x_title` 至少填写一个） |
+| `custom_api_x_title` | string | ⚠️ | OpenRouter 必填项之一：提供应用名称（与 `custom_api_http_referer` 至少填写一个） |
 
 ## 使用示例
 
@@ -64,9 +66,13 @@
   "ai_model": "custom",
   "custom_api_url": "https://openrouter.ai/api/v1",
   "custom_api_key": "sk-or-xxxxx",
-  "custom_model_name": "anthropic/claude-3.5-sonnet"
+  "custom_model_name": "x-ai/grok-4-fast",
+  "custom_api_http_referer": "https://your-app-domain.example.com",
+  "custom_api_x_title": "MyNOF Grok Trader"
 }
 ```
+
+> 至少填写 `custom_api_http_referer` 或 `custom_api_x_title` 其中之一，否则 OpenRouter 会拒绝请求。
 
 ### 3. 本地 Ollama
 
