@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"nofx/decision"
 	"nofx/logger"
 	"nofx/market"
 	"nofx/mcp"
 	"nofx/pool"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -65,6 +67,13 @@ type AutoTraderConfig struct {
 	StopTradingTime time.Duration // 触发风控后暂停时长
 }
 
+const (
+	profitProtectActivationPct  = 12.0 // 触发盈利保护的最小峰值（%）
+	profitProtectLockFloorPct   = 5.0  // 回撤保护的最低保留利润（%）
+	profitProtectMinRetracePct  = 3.0  // 触发保护所需的最小回撤幅度（%）
+	profitProtectRetentionRatio = 0.5  // 保护时至少保留的利润比例
+)
+
 // AutoTrader 自动交易器
 type AutoTrader struct {
 	id                    string // Trader唯一标识
@@ -83,6 +92,7 @@ type AutoTrader struct {
 	startTime             time.Time        // 系统启动时间
 	callCount             int              // AI调用次数
 	positionFirstSeenTime map[string]int64 // 持仓首次出现时间 (symbol_side -> timestamp毫秒)
+	positionPnLHigh       map[string]float64
 }
 
 // NewAutoTrader 创建自动交易器
@@ -177,6 +187,7 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 		callCount:             0,
 		isRunning:             false,
 		positionFirstSeenTime: make(map[string]int64),
+		positionPnLHigh:       make(map[string]float64),
 	}, nil
 }
 
@@ -218,9 +229,9 @@ func (at *AutoTrader) Stop() {
 func (at *AutoTrader) runCycle() error {
 	at.callCount++
 
-	log.Printf("\n" + strings.Repeat("=", 70))
+	log.Print("\n" + strings.Repeat("=", 70))
 	log.Printf("⏰ %s - AI决策周期 #%d", time.Now().Format("2006-01-02 15:04:05"), at.callCount)
-	log.Printf(strings.Repeat("=", 70))
+	log.Print(strings.Repeat("=", 70))
 
 	// 创建决策记录
 	record := &logger.DecisionRecord{
@@ -285,7 +296,22 @@ func (at *AutoTrader) runCycle() error {
 	log.Printf("📊 账户净值: %.2f USDT | 可用: %.2f USDT | 持仓: %d",
 		ctx.Account.TotalEquity, ctx.Account.AvailableBalance, ctx.Account.PositionCount)
 
-	// 4. 调用AI获取完整决策
+	// 4. 盈利回撤保护：在请求AI前先执行强制止盈检查
+	if handled, err := at.applyProfitProtection(ctx, record); err != nil {
+		record.Success = false
+		record.ErrorMessage = fmt.Sprintf("执行盈利保护失败: %v", err)
+		if logErr := at.decisionLogger.LogDecision(record); logErr != nil {
+			log.Printf("⚠ 保存决策记录失败: %v", logErr)
+		}
+		return fmt.Errorf("执行盈利保护失败: %w", err)
+	} else if handled {
+		if logErr := at.decisionLogger.LogDecision(record); logErr != nil {
+			log.Printf("⚠ 保存决策记录失败: %v", logErr)
+		}
+		return nil
+	}
+
+	// 5. 调用AI获取完整决策
 	log.Println("🤖 正在请求AI分析并决策...")
 	fullDecision, err := decision.GetFullDecision(ctx, at.mcpClient)
 
@@ -305,11 +331,11 @@ func (at *AutoTrader) runCycle() error {
 
 		// 打印AI思维链（即使有错误）
 		if fullDecision != nil && fullDecision.CoTTrace != "" {
-			log.Printf("\n" + strings.Repeat("-", 70))
+			log.Print("\n" + strings.Repeat("-", 70))
 			log.Println("💭 AI思维链分析（错误情况）:")
 			log.Println(strings.Repeat("-", 70))
 			log.Println(fullDecision.CoTTrace)
-			log.Printf(strings.Repeat("-", 70) + "\n")
+			log.Print(strings.Repeat("-", 70) + "\n")
 		}
 
 		at.decisionLogger.LogDecision(record)
@@ -385,14 +411,14 @@ func (at *AutoTrader) runCycle() error {
 		}
 	}
 
-	// 5. 打印AI思维链
-	log.Printf("\n" + strings.Repeat("-", 70))
+	// 6. 打印AI思维链
+	log.Print("\n" + strings.Repeat("-", 70))
 	log.Println("💭 AI思维链分析:")
 	log.Println(strings.Repeat("-", 70))
 	log.Println(fullDecision.CoTTrace)
-	log.Printf(strings.Repeat("-", 70) + "\n")
+	log.Print(strings.Repeat("-", 70) + "\n")
 
-	// 6. 打印AI决策
+	// 7. 打印AI决策
 	log.Printf("📋 AI决策列表 (%d 个):\n", len(fullDecision.Decisions))
 	for i, d := range fullDecision.Decisions {
 		log.Printf("  [%d] %s: %s - %s", i+1, d.Symbol, d.Action, d.Reasoning)
@@ -403,7 +429,7 @@ func (at *AutoTrader) runCycle() error {
 	}
 	log.Println()
 
-	// 7. 对决策排序：确保先平仓后开仓（防止仓位叠加超限）
+	// 8. 对决策排序：确保先平仓后开仓（防止仓位叠加超限）
 	sortedDecisions := sortDecisionsByPriority(fullDecision.Decisions)
 
 	log.Println("🔄 执行顺序（已优化）: 先平仓→后开仓")
@@ -438,7 +464,7 @@ func (at *AutoTrader) runCycle() error {
 		record.Decisions = append(record.Decisions, actionRecord)
 	}
 
-	// 8. 保存决策记录
+	// 9. 保存决策记录
 	if err := at.decisionLogger.LogDecision(record); err != nil {
 		log.Printf("⚠ 保存决策记录失败: %v", err)
 	}
@@ -521,6 +547,11 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		}
 		updateTime := at.positionFirstSeenTime[posKey]
 
+		// 记录持仓的最高盈亏百分比（用于盈利保护）
+		if maxPnL, exists := at.positionPnLHigh[posKey]; !exists || pnlPct > maxPnL {
+			at.positionPnLHigh[posKey] = pnlPct
+		}
+
 		positionInfos = append(positionInfos, decision.PositionInfo{
 			Symbol:           symbol,
 			Side:             side,
@@ -540,6 +571,11 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 	for key := range at.positionFirstSeenTime {
 		if !currentPositionKeys[key] {
 			delete(at.positionFirstSeenTime, key)
+		}
+	}
+	for key := range at.positionPnLHigh {
+		if !currentPositionKeys[key] {
+			delete(at.positionPnLHigh, key)
 		}
 	}
 
@@ -647,6 +683,116 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 	}
 
 	return ctx, nil
+}
+
+// applyProfitProtection 针对高收益回撤执行强制止盈保护
+func (at *AutoTrader) applyProfitProtection(ctx *decision.Context, record *logger.DecisionRecord) (bool, error) {
+	forcedClosures := 0
+	failedClosures := 0
+	var errorMessages []string
+
+	for _, pos := range ctx.Positions {
+		posKey := pos.Symbol + "_" + pos.Side
+		currentPnL := pos.UnrealizedPnLPct
+
+		peakPnL, tracked := at.positionPnLHigh[posKey]
+		if !tracked {
+			at.positionPnLHigh[posKey] = currentPnL
+			continue
+		}
+
+		if currentPnL > peakPnL {
+			at.positionPnLHigh[posKey] = currentPnL
+			continue
+		}
+
+		if peakPnL < profitProtectActivationPct {
+			continue
+		}
+
+		retrace := peakPnL - currentPnL
+		lockLevel := math.Max(peakPnL*profitProtectRetentionRatio, profitProtectLockFloorPct)
+
+		// 当回撤幅度达到阈值或利润回吐到0及以下时触发强制平仓
+		if (currentPnL <= lockLevel && retrace >= profitProtectMinRetracePct) || currentPnL <= 0 {
+			log.Printf("🛡 盈利回撤保护触发: %s %s 峰值%.2f%% → 当前%.2f%% (回撤%.2f%%)",
+				pos.Symbol, pos.Side, peakPnL, currentPnL, retrace)
+			record.ExecutionLog = append(record.ExecutionLog,
+				fmt.Sprintf("🛡 盈利回撤保护触发: %s %s 峰值%.2f%% → 当前%.2f%% (回撤%.2f%%)",
+					pos.Symbol, pos.Side, peakPnL, currentPnL, retrace))
+
+			if err := at.trader.CancelAllOrders(pos.Symbol); err != nil {
+				log.Printf("  ⚠ 取消 %s 未完成委托失败: %v", pos.Symbol, err)
+			}
+
+			var (
+				order  map[string]interface{}
+				err    error
+				action string
+			)
+
+			switch pos.Side {
+			case "long":
+				order, err = at.trader.CloseLong(pos.Symbol, 0)
+				action = "close_long"
+			case "short":
+				order, err = at.trader.CloseShort(pos.Symbol, 0)
+				action = "close_short"
+			default:
+				log.Printf("  ⚠ 未知持仓方向 %s，跳过盈利保护执行", pos.Side)
+				continue
+			}
+
+			actionRecord := logger.DecisionAction{
+				Action:    action,
+				Symbol:    pos.Symbol,
+				Quantity:  pos.Quantity,
+				Leverage:  pos.Leverage,
+				Price:     pos.MarkPrice,
+				Timestamp: time.Now(),
+			}
+
+			if err != nil {
+				failedClosures++
+				errMsg := fmt.Sprintf("盈利回撤平仓失败 %s %s: %v", pos.Symbol, pos.Side, err)
+				log.Printf("❌ %s", errMsg)
+				actionRecord.Success = false
+				actionRecord.Error = err.Error()
+				errorMessages = append(errorMessages, errMsg)
+			} else {
+				forcedClosures++
+				if orderID, ok := extractOrderID(order); ok {
+					actionRecord.OrderID = orderID
+				}
+				actionRecord.Success = true
+				record.ExecutionLog = append(record.ExecutionLog,
+					fmt.Sprintf("✓ 盈利回撤保护平仓成功: %s %s 保留利润%.2f%%",
+						pos.Symbol, pos.Side, math.Max(currentPnL, 0)))
+				delete(at.positionPnLHigh, posKey)
+				delete(at.positionFirstSeenTime, posKey)
+			}
+
+			record.Decisions = append(record.Decisions, actionRecord)
+		}
+	}
+
+	totalAttempts := forcedClosures + failedClosures
+	if totalAttempts == 0 {
+		return false, nil
+	}
+
+	summary := fmt.Sprintf("🛡 盈利回撤保护：触发%d个持仓，成功%d个，失败%d个",
+		totalAttempts, forcedClosures, failedClosures)
+	log.Println(summary)
+	record.ExecutionLog = append(record.ExecutionLog, summary)
+	record.DecisionJSON = "[]"
+
+	if failedClosures > 0 {
+		record.Success = false
+		record.ErrorMessage = strings.Join(errorMessages, "; ")
+	}
+
+	return true, nil
 }
 
 func (at *AutoTrader) generateRiskFlags(ctx *decision.Context, decisions []decision.Decision) []decision.RiskFlag {
@@ -986,6 +1132,34 @@ func (at *AutoTrader) executeCloseShortWithRecord(decision *decision.Decision, a
 
 	log.Printf("  ✓ 平仓成功")
 	return nil
+}
+
+func extractOrderID(order map[string]interface{}) (int64, bool) {
+	if order == nil {
+		return 0, false
+	}
+
+	value, ok := order["orderId"]
+	if !ok {
+		return 0, false
+	}
+
+	switch v := value.(type) {
+	case int64:
+		return v, true
+	case int:
+		return int64(v), true
+	case uint64:
+		return int64(v), true
+	case float64:
+		return int64(v), true
+	case string:
+		if id, err := strconv.ParseInt(v, 10, 64); err == nil {
+			return id, true
+		}
+	}
+
+	return 0, false
 }
 
 // GetID 获取trader ID

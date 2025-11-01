@@ -42,7 +42,7 @@
     {
       "id": "aster_deepseek",
       "name": "Aster DeepSeek Trader",
-      "enabled": true,
+      "enabled": false,
       "ai_model": "deepseek",
       "exchange": "aster",
 
@@ -71,9 +71,7 @@
     "SOLUSDT",
     "BNBUSDT",
     "XRPUSDT",
-    "DOGEUSDT",
-    "ADAUSDT",
-    "HYPEUSDT"
+    "DOGEUSDT"
   ],
   "coin_pool_api_url": "",
   "oi_top_api_url": "",
