@@ -11,7 +11,13 @@
       "hyperliquid_testnet": false,
       "deepseek_key": "your_deepseek_api_key",
       "initial_balance": 1000,
-      "scan_interval_minutes": 3
+      "scan_interval_minutes": 3,
+      "early_profit_protect_enabled": true,
+      "early_profit_activation_pct": 1.0,
+      "early_profit_retrace_ratio": 0.4,
+      "early_profit_min_retrace_pct": 0.8,
+      "early_profit_retention_ratio": 0.55,
+      "early_profit_max_hold_minutes": 9
     },
     {
       "id": "binance_qwen",
