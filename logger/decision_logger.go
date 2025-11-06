@@ -297,18 +297,21 @@ type TradeOutcome struct {
 
 // PerformanceAnalysis 交易表现分析
 type PerformanceAnalysis struct {
-	TotalTrades   int                           `json:"total_trades"`   // 总交易数
-	WinningTrades int                           `json:"winning_trades"` // 盈利交易数
-	LosingTrades  int                           `json:"losing_trades"`  // 亏损交易数
-	WinRate       float64                       `json:"win_rate"`       // 胜率
-	AvgWin        float64                       `json:"avg_win"`        // 平均盈利
-	AvgLoss       float64                       `json:"avg_loss"`       // 平均亏损
-	ProfitFactor  float64                       `json:"profit_factor"`  // 盈亏比
-	SharpeRatio   float64                       `json:"sharpe_ratio"`   // 夏普比率（风险调整后收益）
-	RecentTrades  []TradeOutcome                `json:"recent_trades"`  // 最近N笔交易
-	SymbolStats   map[string]*SymbolPerformance `json:"symbol_stats"`   // 各币种表现
-	BestSymbol    string                        `json:"best_symbol"`    // 表现最好的币种
-	WorstSymbol   string                        `json:"worst_symbol"`   // 表现最差的币种
+	TotalTrades      int                           `json:"total_trades"`       // 总交易数
+	WinningTrades    int                           `json:"winning_trades"`     // 盈利交易数
+	LosingTrades     int                           `json:"losing_trades"`      // 亏损交易数
+	WinRate          float64                       `json:"win_rate"`           // 胜率
+	AvgWin           float64                       `json:"avg_win"`            // 平均盈利
+	AvgLoss          float64                       `json:"avg_loss"`           // 平均亏损
+	ProfitFactor     float64                       `json:"profit_factor"`      // 盈亏比
+	SharpeRatio      float64                       `json:"sharpe_ratio"`       // 夏普比率（风险调整后收益）
+	RecentPnL        float64                       `json:"recent_pn_l"`        // 最近几笔交易的盈亏总和
+	RecentWinStreak  int                           `json:"recent_win_streak"`  // 连续盈利次数（从最近开始）
+	RecentLossStreak int                           `json:"recent_loss_streak"` // 连续亏损次数（从最近开始）
+	RecentTrades     []TradeOutcome                `json:"recent_trades"`      // 最近N笔交易
+	SymbolStats      map[string]*SymbolPerformance `json:"symbol_stats"`       // 各币种表现
+	BestSymbol       string                        `json:"best_symbol"`        // 表现最好的币种
+	WorstSymbol      string                        `json:"worst_symbol"`       // 表现最差的币种
 }
 
 // SymbolPerformance 币种表现统计
@@ -544,6 +547,38 @@ func (l *DecisionLogger) AnalyzePerformance(lookbackCycles int) (*PerformanceAna
 		for i, j := 0, len(analysis.RecentTrades)-1; i < j; i, j = i+1, j-1 {
 			analysis.RecentTrades[i], analysis.RecentTrades[j] = analysis.RecentTrades[j], analysis.RecentTrades[i]
 		}
+	}
+
+	// 计算近期盈亏与连胜/连败
+	if len(analysis.RecentTrades) > 0 {
+		limit := len(analysis.RecentTrades)
+		if limit > 5 {
+			limit = 5
+		}
+		recentPnL := 0.0
+		for i := 0; i < limit; i++ {
+			recentPnL += analysis.RecentTrades[i].PnL
+		}
+		analysis.RecentPnL = recentPnL
+
+		winStreak := 0
+		for _, trade := range analysis.RecentTrades {
+			if trade.PnL > 0 {
+				winStreak++
+			} else {
+				break
+			}
+		}
+		lossStreak := 0
+		for _, trade := range analysis.RecentTrades {
+			if trade.PnL < 0 {
+				lossStreak++
+			} else {
+				break
+			}
+		}
+		analysis.RecentWinStreak = winStreak
+		analysis.RecentLossStreak = lossStreak
 	}
 
 	// 计算夏普比率（需要至少2个数据点）

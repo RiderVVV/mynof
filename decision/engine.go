@@ -473,6 +473,7 @@ type promptRisk struct {
 	MaxPositionUSD     map[string]float64 `json:"max_position_usd"`
 	MaxLeverage        map[string]int     `json:"max_leverage"`
 	SharpeCoolingLevel string             `json:"sharpe_cooling_level,omitempty"`
+	PerformanceState   string             `json:"performance_state,omitempty"`
 }
 
 type promptPosition struct {
@@ -501,15 +502,18 @@ type promptRecentTrade struct {
 }
 
 type promptPerformance struct {
-	SharpeRatio  float64             `json:"sharpe_ratio"`
-	TotalTrades  int                 `json:"total_trades"`
-	WinRate      float64             `json:"win_rate"`
-	ProfitFactor float64             `json:"profit_factor"`
-	AvgWin       float64             `json:"avg_win"`
-	AvgLoss      float64             `json:"avg_loss"`
-	BestSymbol   string              `json:"best_symbol,omitempty"`
-	WorstSymbol  string              `json:"worst_symbol,omitempty"`
-	RecentTrades []promptRecentTrade `json:"recent_trades,omitempty"`
+	SharpeRatio      float64             `json:"sharpe_ratio"`
+	TotalTrades      int                 `json:"total_trades"`
+	WinRate          float64             `json:"win_rate"`
+	ProfitFactor     float64             `json:"profit_factor"`
+	AvgWin           float64             `json:"avg_win"`
+	AvgLoss          float64             `json:"avg_loss"`
+	RecentPnL        float64             `json:"recent_pn_l,omitempty"`
+	RecentWinStreak  int                 `json:"recent_win_streak,omitempty"`
+	RecentLossStreak int                 `json:"recent_loss_streak,omitempty"`
+	BestSymbol       string              `json:"best_symbol,omitempty"`
+	WorstSymbol      string              `json:"worst_symbol,omitempty"`
+	RecentTrades     []promptRecentTrade `json:"recent_trades,omitempty"`
 }
 
 type promptOpenInterest struct {
@@ -638,10 +642,38 @@ func buildPromptSnapshot(ctx *Context) promptSnapshot {
 
 	performance := buildPerformanceSnapshot(ctx.Performance)
 	if performance != nil {
-		if performance.SharpeRatio < -0.5 {
-			risk.SharpeCoolingLevel = "halt_6_cycles"
-		} else if performance.SharpeRatio < 0 {
+		perfState := ""
+
+		if performance.RecentLossStreak >= 3 || performance.RecentPnL <= -riskBudget {
+			risk.SharpeCoolingLevel = "halt_3_cycles"
+			perfState = "loss_streak"
+		} else if performance.RecentLossStreak >= 2 || performance.RecentPnL <= -riskBudget*0.5 {
 			risk.SharpeCoolingLevel = "only_high_confidence_trades"
+			perfState = "drawdown"
+		}
+
+		if performance.TotalTrades >= 5 {
+			if performance.SharpeRatio < -0.5 {
+				risk.SharpeCoolingLevel = "halt_6_cycles"
+				if perfState == "" {
+					perfState = "loss_streak"
+				}
+			} else if performance.SharpeRatio < 0 && risk.SharpeCoolingLevel == "" {
+				risk.SharpeCoolingLevel = "only_high_confidence_trades"
+				if perfState == "" {
+					perfState = "drawdown"
+				}
+			}
+		}
+
+		if performance.RecentWinStreak >= 2 && performance.RecentPnL > 0 {
+			if risk.SharpeCoolingLevel == "" {
+				perfState = "positive"
+			}
+		}
+
+		if perfState != "" {
+			risk.PerformanceState = perfState
 		}
 	}
 
@@ -706,15 +738,18 @@ func buildPerformanceSnapshot(raw interface{}) *promptPerformance {
 	}
 
 	type rawPerformance struct {
-		SharpeRatio  float64          `json:"sharpe_ratio"`
-		TotalTrades  int              `json:"total_trades"`
-		WinRate      float64          `json:"win_rate"`
-		ProfitFactor float64          `json:"profit_factor"`
-		AvgWin       float64          `json:"avg_win"`
-		AvgLoss      float64          `json:"avg_loss"`
-		BestSymbol   string           `json:"best_symbol"`
-		WorstSymbol  string           `json:"worst_symbol"`
-		RecentTrades []rawRecentTrade `json:"recent_trades"`
+		SharpeRatio      float64          `json:"sharpe_ratio"`
+		TotalTrades      int              `json:"total_trades"`
+		WinRate          float64          `json:"win_rate"`
+		ProfitFactor     float64          `json:"profit_factor"`
+		AvgWin           float64          `json:"avg_win"`
+		AvgLoss          float64          `json:"avg_loss"`
+		RecentPnL        float64          `json:"recent_pn_l"`
+		RecentWinStreak  int              `json:"recent_win_streak"`
+		RecentLossStreak int              `json:"recent_loss_streak"`
+		BestSymbol       string           `json:"best_symbol"`
+		WorstSymbol      string           `json:"worst_symbol"`
+		RecentTrades     []rawRecentTrade `json:"recent_trades"`
 	}
 
 	var perf rawPerformance
@@ -723,14 +758,17 @@ func buildPerformanceSnapshot(raw interface{}) *promptPerformance {
 	}
 
 	result := &promptPerformance{
-		SharpeRatio:  perf.SharpeRatio,
-		TotalTrades:  perf.TotalTrades,
-		WinRate:      perf.WinRate,
-		ProfitFactor: perf.ProfitFactor,
-		AvgWin:       perf.AvgWin,
-		AvgLoss:      perf.AvgLoss,
-		BestSymbol:   perf.BestSymbol,
-		WorstSymbol:  perf.WorstSymbol,
+		SharpeRatio:      perf.SharpeRatio,
+		TotalTrades:      perf.TotalTrades,
+		WinRate:          perf.WinRate,
+		ProfitFactor:     perf.ProfitFactor,
+		AvgWin:           perf.AvgWin,
+		AvgLoss:          perf.AvgLoss,
+		RecentPnL:        perf.RecentPnL,
+		RecentWinStreak:  perf.RecentWinStreak,
+		RecentLossStreak: perf.RecentLossStreak,
+		BestSymbol:       perf.BestSymbol,
+		WorstSymbol:      perf.WorstSymbol,
 	}
 
 	if len(perf.RecentTrades) > 0 {

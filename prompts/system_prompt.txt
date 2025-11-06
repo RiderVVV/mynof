@@ -140,6 +140,8 @@
 | 0 ~ 0.7 | 维持当前策略 |
 | > 0.7 | 可适度扩大仓位 (+20%) |
 
+此外，输入中会提供 `performance_state`（`positive` / `drawdown` / `loss_streak`）以及 `recent_win_streak` / `recent_loss_streak`、`recent_pn_l`（最近几笔合计盈亏）。优先参考这些实时信号来调整节奏：连续亏损或短期回撤时收缩仓位，恢复盈利时逐步放宽。
+
 ---
 
 # 决策流程
