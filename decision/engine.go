@@ -546,6 +546,7 @@ type promptRangeState struct {
 	Timeframe         string  `json:"timeframe"`
 	LookbackCandles   int     `json:"lookback_candles"`
 	LookbackMinutes   int     `json:"lookback_minutes"`
+	AgeBars1h         int     `json:"age_bars_1h,omitempty"`
 	High              float64 `json:"high"`
 	Low               float64 `json:"low"`
 	Mid               float64 `json:"mid"`
@@ -560,6 +561,8 @@ type promptRangeState struct {
 	DistanceToLowPct  float64 `json:"distance_to_low_pct"`
 	PriceLocation     string  `json:"price_location"`
 	Regime            string  `json:"regime"`
+	ADX144h           float64 `json:"adx14_4h,omitempty"`
+	BBP1h             float64 `json:"bbp_1h,omitempty"`
 }
 
 // MarketGuardrailWarning 市场硬性约束提示
@@ -965,6 +968,7 @@ func buildMarketSnapshot(symbol string, data *market.Data, sources []string) pro
 			Timeframe:         data.RangeState.Timeframe,
 			LookbackCandles:   data.RangeState.LookbackCandles,
 			LookbackMinutes:   data.RangeState.LookbackMinutes,
+			AgeBars1h:         data.RangeState.AgeBars1h,
 			High:              data.RangeState.High,
 			Low:               data.RangeState.Low,
 			Mid:               data.RangeState.Mid,
@@ -979,6 +983,8 @@ func buildMarketSnapshot(symbol string, data *market.Data, sources []string) pro
 			DistanceToLowPct:  data.RangeState.DistanceToLowPct,
 			PriceLocation:     data.RangeState.PriceLocation,
 			Regime:            data.RangeState.Regime,
+			ADX144h:           data.RangeState.ADX144h,
+			BBP1h:             data.RangeState.BBP1h,
 		}
 	}
 
@@ -1113,11 +1119,33 @@ func collectConfidenceFlags(data *market.Data, snapshot promptMarket) []string {
 			flags = append(flags, "range_trend_attempt")
 		}
 
-		if snapshot.RangeState.PriceLocation == "inside" && snapshot.RangeState.WidthToATR14 >= 1.5 {
+		if snapshot.RangeState.PriceLocation == "mid" && snapshot.RangeState.WidthToATR14 >= 1.5 {
 			flags = append(flags, "range_wide_enough")
 		}
-		if snapshot.RangeState.PriceLocation == "inside" && math.Abs(snapshot.RangeState.DistanceToHighPct-snapshot.RangeState.DistanceToLowPct) <= 0.3 {
+		if snapshot.RangeState.PriceLocation == "mid" && math.Abs(snapshot.RangeState.DistanceToHighPct-snapshot.RangeState.DistanceToLowPct) <= 0.3 {
 			flags = append(flags, "range_centered")
+		}
+
+		switch snapshot.RangeState.PriceLocation {
+		case "near_low":
+			flags = append(flags, "range_near_low")
+		case "near_high":
+			flags = append(flags, "range_near_high")
+		case "outside_low":
+			flags = append(flags, "range_breakdown_risk")
+		case "outside_high":
+			flags = append(flags, "range_breakout_risk")
+		}
+
+		if snapshot.RangeState.TouchesLow >= 2 {
+			flags = append(flags, "range_low_confirmed")
+		}
+		if snapshot.RangeState.TouchesHigh >= 2 {
+			flags = append(flags, "range_high_confirmed")
+		}
+
+		if snapshot.RangeState.ADX144h > 0 && snapshot.RangeState.ADX144h < 18 {
+			flags = append(flags, "range_adx_low")
 		}
 	}
 

@@ -35,9 +35,12 @@
 3. 单币仓位
    - 山寨： {ALTCOIN_MIN} - {ALTCOIN_MAX} U ({ALTCOIN_LEVERAGE} x)
    - BTC/ETH： {BTCETH_MIN} - {BTCETH_MAX} U ({BTCETH_LEVERAGE} x)
-4. 总保证金使用率 <= 90%
-5. 单笔风险敞口 <= 账户净值 3%
+4. 总保证金使用率 ≤ 50%
+5. 单笔风险敞口 <= 账户净值 3%（区间脚本建议 0.5%~1.5%）
 6. 强平价距离 >= 15% (防止过高杠杆)
+7. 当日净亏损 ≥ min(2R, 净值 3%) 时剩余周期全部 `wait`
+8. 重大宏观事件或项目公告前后 ±30 分钟仅允许 `hold/wait`，禁止新开仓
+9. 相关性控制：若 BTC 与 ETH 同向加速，山寨仓位与总仓位上限各减半
 
 ---
 
@@ -55,6 +58,9 @@
 | 资金费率 | 极端正值 => 多头拥挤易回调；极端负值 => 空头拥挤易反弹 |
 
 信号越多维度共振把握越高，但不是硬性门槛；只要有明确的结构锚点、可计算的风险收益比，以及成交/动量等一到两项强背书，就可以果断执行。
+
+系统会为每个标的提供 `range_state` 快照（若满足震荡条件），包含：
+`high/low/mid/width_pct/width_to_atr14/vwap/touches_high/touches_low/price_location{near_low, near_high, mid, outside_*}/age_bars_1h/adx14_4h/bbp_1h` 等，可直接用于判断区间质量与入场位置。
 
 ---
 
@@ -113,21 +119,33 @@
 
 # 资金与仓位控制
 
-`position_size_usd = available_balance * leverage * position_ratio`
+先确定计划风险：
+`risk_usd = confidence_bucket * risk_budget_usd` （区间脚本常用 0.5R~1.5R，趋势脚本可放到 1R~3R）
 
-按信心度动态调整：
+倒推仓位：
+`position_size_usd = min( (risk_usd * entry_price) / abs(entry_price - stop_loss), 仓位上限 )`
 
-| 信心度 | 杠杆范围 | 仓位比例 (账户净值) |
+按信心度与脚本选择杠杆：
+
+| 信心度 | 杠杆范围 | 建议 risk_usd / risk_budget |
 | --- | --- | --- |
-| 0.60-0.75 | 3-5 x | <= 10% |
-| 0.75-0.85 | 5-10 x | <= 20% |
-| 0.85-1.00 | 10-20 x | <= 30% |
+| 60-70 | 3-4 x | 0.5 |
+| 70-80 | 4-6 x | 0.75 |
+| 80-90 | 6-8 x | 1.0 |
+| 90-100 | 8-12 x | 1.25-1.5 |
 
-风险计算：
-`risk_usd = abs(entry - stop_loss) * position_size_usd / entry`
-单笔 risk_usd <= 账户净值 3%。
+记得检查倒推后的保证金占用（≤50%）与强平距离（≥15%）。
 
 止损必须放在 1H 或 4H 结构失效位（前高/前低、结构突破点），止盈参考同级别支撑阻力或 ATR 倍数；仅在 3m/15m 触发风险时提前退出。
+
+---
+
+# 信心度刻度
+
+- 首先对以下特征打分（0~1）：`S1` 区间贴边程度、`S2` 15m 反转形态质量、`S3` 量价/ OI 同步、`S4` 多周期一致性；风险特征 `R1` 事件或资金费率风险（越高扣分）。
+- 计算：`z = 0.8*S1 + 0.6*S2 + 0.6*S3 + 0.4*S4 - 0.7*R1`，再令 `p = σ(z)`（Logistic），`confidence = round(100 * p)`。
+- 回测校准：确保 `confidence ≥ 75` 的样本具备显著更高的命中率；若未达标，需要调整打分权重。
+- 区间脚本常见：`S1`≥0.7、`S2`≥0.6、`S3`≥0.5、`S4`≥0.5 且 `R1`≤0.3，通常即可达到 75 分以上。
 
 ---
 

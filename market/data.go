@@ -73,6 +73,7 @@ type RangeState struct {
 	Timeframe         string
 	LookbackCandles   int
 	LookbackMinutes   int
+	AgeBars1h         int
 	High              float64
 	Low               float64
 	Mid               float64
@@ -87,6 +88,8 @@ type RangeState struct {
 	DistanceToLowPct  float64
 	PriceLocation     string
 	Regime            string
+	ADX144h           float64
+	BBP1h             float64
 }
 
 // Kline K线数据
@@ -183,7 +186,7 @@ func Get(symbol string) (*Data, error) {
 	// 计算长期数据
 	longerTermData := calculateLongerTermData(klines4h)
 	atr15m := calculateATR(klines15m, 14)
-	rangeState := calculateRangeState(klines15m, atr15m, currentPrice)
+	rangeState := calculateRangeState(klines15m, klines1h, klines4h, atr15m, currentPrice)
 
 	return &Data{
 		Symbol:            symbol,
@@ -711,13 +714,13 @@ func Format(data *Data) string {
 	return sb.String()
 }
 
-func calculateRangeState(klines []Kline, atr float64, currentPrice float64) *RangeState {
-	if len(klines) == 0 || currentPrice <= 0 {
+func calculateRangeState(klines15m []Kline, klines1h []Kline, klines4h []Kline, atr float64, currentPrice float64) *RangeState {
+	if len(klines15m) == 0 || currentPrice <= 0 {
 		return nil
 	}
 
-	lookback := minInt(len(klines), 40)
-	subset := klines[len(klines)-lookback:]
+	lookback := minInt(len(klines15m), 40)
+	subset := klines15m[len(klines15m)-lookback:]
 
 	high := subset[0].High
 	low := subset[0].Low
@@ -771,28 +774,46 @@ func calculateRangeState(klines []Kline, atr float64, currentPrice float64) *Ran
 		distLowPct = ((currentPrice - low) / currentPrice) * 100
 	}
 
-	priceLocation := "inside"
+	priceLocation := "mid"
 	if currentPrice > high {
-		priceLocation = "above"
+		priceLocation = "outside_high"
 	} else if currentPrice < low {
-		priceLocation = "below"
+		priceLocation = "outside_low"
+	} else if width > 0 {
+		positionRatio := (currentPrice - low) / width
+		switch {
+		case positionRatio <= 0.15:
+			priceLocation = "near_low"
+		case positionRatio >= 0.85:
+			priceLocation = "near_high"
+		default:
+			priceLocation = "mid"
+		}
 	}
 
 	regime := "range"
-	if priceLocation == "above" {
+	switch priceLocation {
+	case "outside_high":
 		regime = "breakout_up"
-	} else if priceLocation == "below" {
+	case "outside_low":
 		regime = "breakout_down"
-	} else if widthToATR <= 1.0 {
-		regime = "squeeze"
-	} else if touchesHigh <= 1 && touchesLow <= 1 {
-		regime = "trend_attempt"
+	default:
+		if widthToATR <= 1.0 {
+			regime = "squeeze"
+		} else if touchesHigh <= 1 && touchesLow <= 1 {
+			regime = "trend_attempt"
+		}
 	}
+
+	ageBars1h := int(math.Max(1, math.Round(float64(lookback)*15.0/60.0)))
+	adx4h := calculateADX(klines4h, 14)
+	bbp1h := calculateBollingerPercent(klines1h, 20)
 
 	return &RangeState{
 		Timeframe:         "15m",
 		LookbackCandles:   lookback,
 		LookbackMinutes:   lookback * 15,
+		AgeBars1h:         ageBars1h,
 		High:              high,
 		Low:               low,
 		Mid:               mid,
@@ -807,6 +828,8 @@ func calculateRangeState(klines []Kline, atr float64, currentPrice float64) *Ran
 		DistanceToLowPct:  distLowPct,
 		PriceLocation:     priceLocation,
 		Regime:            regime,
+		ADX144h:           adx4h,
+		BBP1h:             bbp1h,
 	}
 }
 
@@ -828,6 +851,104 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func calculateADX(klines []Kline, period int) float64 {
+	if period <= 0 || len(klines) <= period {
+		return 0
+	}
+
+	type directional struct {
+		tr      float64
+		plusDM  float64
+		minusDM float64
+	}
+
+	values := make([]directional, len(klines))
+	for i := 1; i < len(klines); i++ {
+		highDiff := klines[i].High - klines[i-1].High
+		lowDiff := klines[i-1].Low - klines[i].Low
+
+		var plusDM, minusDM float64
+		if highDiff > 0 && highDiff > lowDiff {
+			plusDM = highDiff
+		}
+		if lowDiff > 0 && lowDiff > highDiff {
+			minusDM = lowDiff
+		}
+
+		tr := math.Max(klines[i].High-klines[i].Low, math.Max(math.Abs(klines[i].High-klines[i-1].Close), math.Abs(klines[i].Low-klines[i-1].Close)))
+		values[i] = directional{
+			tr:      tr,
+			plusDM:  plusDM,
+			minusDM: minusDM,
+		}
+	}
+
+	var sumTR, sumPlusDM, sumMinusDM float64
+	for i := 1; i <= period; i++ {
+		sumTR += values[i].tr
+		sumPlusDM += values[i].plusDM
+		sumMinusDM += values[i].minusDM
+	}
+
+	const smoothFactor = 1.0
+	var diPlus, diMinus float64
+	for i := period + 1; i < len(klines); i++ {
+		sumTR = sumTR - (sumTR / float64(period)) + values[i].tr
+		sumPlusDM = sumPlusDM - (sumPlusDM / float64(period)) + values[i].plusDM
+		sumMinusDM = sumMinusDM - (sumMinusDM / float64(period)) + values[i].minusDM
+
+		if sumTR == 0 {
+			continue
+		}
+		diPlus = 100 * (sumPlusDM / sumTR)
+		diMinus = 100 * (sumMinusDM / sumTR)
+	}
+
+	if diPlus+diMinus == 0 {
+		return 0
+	}
+
+	dx := 100 * math.Abs(diPlus-diMinus) / (diPlus + diMinus)
+
+	// 简化处理：返回最后一次平滑后的 DX 作为 ADX 估计
+	return dx * smoothFactor
+}
+
+func calculateBollingerPercent(klines []Kline, period int) float64 {
+	if period <= 0 || len(klines) < period {
+		return 0.5
+	}
+
+	closes := make([]float64, period)
+	start := len(klines) - period
+	for i := 0; i < period; i++ {
+		closes[i] = klines[start+i].Close
+	}
+
+	mean := 0.0
+	for _, c := range closes {
+		mean += c
+	}
+	mean /= float64(period)
+
+	var variance float64
+	for _, c := range closes {
+		diff := c - mean
+		variance += diff * diff
+	}
+	std := math.Sqrt(variance / float64(period))
+
+	upper := mean + 2*std
+	lower := mean - 2*std
+
+	if upper == lower {
+		return 0.5
+	}
+
+	latest := closes[len(closes)-1]
+	return (latest - lower) / (upper - lower)
 }
 
 // formatFloatSlice 格式化float64切片为字符串
