@@ -538,6 +538,26 @@ type promptIntraday struct {
 	PriceSlope float64 `json:"price_slope_pct"`
 }
 
+type promptRangeState struct {
+	Timeframe         string  `json:"timeframe"`
+	LookbackCandles   int     `json:"lookback_candles"`
+	LookbackMinutes   int     `json:"lookback_minutes"`
+	High              float64 `json:"high"`
+	Low               float64 `json:"low"`
+	Mid               float64 `json:"mid"`
+	Width             float64 `json:"width"`
+	WidthPct          float64 `json:"width_pct"`
+	WidthToATR14      float64 `json:"width_to_atr14"`
+	ATR14             float64 `json:"atr14"`
+	VWAP              float64 `json:"vwap"`
+	TouchesHigh       int     `json:"touches_high"`
+	TouchesLow        int     `json:"touches_low"`
+	DistanceToHighPct float64 `json:"distance_to_high_pct"`
+	DistanceToLowPct  float64 `json:"distance_to_low_pct"`
+	PriceLocation     string  `json:"price_location"`
+	Regime            string  `json:"regime"`
+}
+
 // MarketGuardrailWarning 市场硬性约束提示
 type MarketGuardrailWarning struct {
 	Code     string `json:"code"`
@@ -555,9 +575,11 @@ type promptMarket struct {
 	FundingRate       float64                  `json:"funding_rate"`
 	OpenInterest      *promptOpenInterest      `json:"open_interest,omitempty"`
 	Volatility        *promptVolatility        `json:"volatility,omitempty"`
+	M15               *promptTimeframe         `json:"m15,omitempty"`
 	H1                *promptTimeframe         `json:"h1,omitempty"`
 	H4                *promptTimeframe         `json:"h4,omitempty"`
 	Intraday          *promptIntraday          `json:"intraday,omitempty"`
+	RangeState        *promptRangeState        `json:"range_state,omitempty"`
 	ConfidenceFlags   []string                 `json:"confidence_flags,omitempty"`
 	GuardrailWarnings []MarketGuardrailWarning `json:"guardrail_warnings,omitempty"`
 }
@@ -872,6 +894,16 @@ func buildMarketSnapshot(symbol string, data *market.Data, sources []string) pro
 		snapshot.H4.TrendBias = deriveTimeframeTrendBias(snapshot.H4)
 	}
 
+	if data.MidTermContext != nil {
+		snapshot.M15 = &promptTimeframe{
+			EMA20: data.MidTermContext.EMA20,
+			EMA50: data.MidTermContext.EMA50,
+			MACD:  data.MidTermContext.MACD,
+			RSI14: data.MidTermContext.RSI14,
+		}
+		snapshot.M15.TrendBias = deriveTimeframeTrendBias(snapshot.M15)
+	}
+
 	if data.HourlyContext != nil {
 		snapshot.H1 = &promptTimeframe{
 			EMA20: data.HourlyContext.EMA20,
@@ -887,6 +919,28 @@ func buildMarketSnapshot(symbol string, data *market.Data, sources []string) pro
 			MACD:       lastFloat(data.IntradaySeries.MACDValues),
 			RSI7:       lastFloat(data.IntradaySeries.RSI7Values),
 			PriceSlope: calcPriceSlope(data.IntradaySeries.MidPrices),
+		}
+	}
+
+	if data.RangeState != nil {
+		snapshot.RangeState = &promptRangeState{
+			Timeframe:         data.RangeState.Timeframe,
+			LookbackCandles:   data.RangeState.LookbackCandles,
+			LookbackMinutes:   data.RangeState.LookbackMinutes,
+			High:              data.RangeState.High,
+			Low:               data.RangeState.Low,
+			Mid:               data.RangeState.Mid,
+			Width:             data.RangeState.Width,
+			WidthPct:          data.RangeState.WidthPct,
+			WidthToATR14:      data.RangeState.WidthToATR14,
+			ATR14:             data.RangeState.ATR14,
+			VWAP:              data.RangeState.VWAP,
+			TouchesHigh:       data.RangeState.TouchesHigh,
+			TouchesLow:        data.RangeState.TouchesLow,
+			DistanceToHighPct: data.RangeState.DistanceToHighPct,
+			DistanceToLowPct:  data.RangeState.DistanceToLowPct,
+			PriceLocation:     data.RangeState.PriceLocation,
+			Regime:            data.RangeState.Regime,
 		}
 	}
 
@@ -977,7 +1031,7 @@ func lastFloat(values []float64) float64 {
 }
 
 func collectConfidenceFlags(data *market.Data, snapshot promptMarket) []string {
-	flags := make([]string, 0, 6)
+	flags := make([]string, 0, 12)
 
 	if snapshot.TrendBias == "bullish" && snapshot.H1 != nil && snapshot.H1.TrendBias == "bullish" {
 		flags = append(flags, "multi_tf_bullish")
@@ -1004,6 +1058,28 @@ func collectConfidenceFlags(data *market.Data, snapshot promptMarket) []string {
 			flags = append(flags, "oi_expanding")
 		case snapshot.OpenInterest.Ratio > 0 && snapshot.OpenInterest.Ratio <= 0.9:
 			flags = append(flags, "oi_contracting")
+		}
+	}
+
+	if snapshot.RangeState != nil {
+		switch snapshot.RangeState.Regime {
+		case "range":
+			flags = append(flags, "range_tradable")
+		case "squeeze":
+			flags = append(flags, "range_squeeze")
+		case "breakout_up":
+			flags = append(flags, "range_breakout_up")
+		case "breakout_down":
+			flags = append(flags, "range_breakout_down")
+		case "trend_attempt":
+			flags = append(flags, "range_trend_attempt")
+		}
+
+		if snapshot.RangeState.PriceLocation == "inside" && snapshot.RangeState.WidthToATR14 >= 1.5 {
+			flags = append(flags, "range_wide_enough")
+		}
+		if snapshot.RangeState.PriceLocation == "inside" && math.Abs(snapshot.RangeState.DistanceToHighPct-snapshot.RangeState.DistanceToLowPct) <= 0.3 {
+			flags = append(flags, "range_centered")
 		}
 	}
 

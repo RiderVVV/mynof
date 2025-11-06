@@ -26,6 +26,7 @@ type Data struct {
 	MidTermContext    *TimeframeSnapshot
 	HourlyContext     *TimeframeSnapshot
 	LongerTermContext *LongerTermData
+	RangeState        *RangeState
 }
 
 // OIData Open Interest数据
@@ -65,6 +66,27 @@ type LongerTermData struct {
 	AverageVolume float64
 	MACDValues    []float64
 	RSI14Values   []float64
+}
+
+// RangeState 表示某个时间框架下的震荡区间信息
+type RangeState struct {
+	Timeframe         string
+	LookbackCandles   int
+	LookbackMinutes   int
+	High              float64
+	Low               float64
+	Mid               float64
+	Width             float64
+	WidthPct          float64
+	ATR14             float64
+	WidthToATR14      float64
+	VWAP              float64
+	TouchesHigh       int
+	TouchesLow        int
+	DistanceToHighPct float64
+	DistanceToLowPct  float64
+	PriceLocation     string
+	Regime            string
 }
 
 // Kline K线数据
@@ -160,6 +182,8 @@ func Get(symbol string) (*Data, error) {
 
 	// 计算长期数据
 	longerTermData := calculateLongerTermData(klines4h)
+	atr15m := calculateATR(klines15m, 14)
+	rangeState := calculateRangeState(klines15m, atr15m, currentPrice)
 
 	return &Data{
 		Symbol:            symbol,
@@ -176,6 +200,7 @@ func Get(symbol string) (*Data, error) {
 		MidTermContext:    midTermData,
 		HourlyContext:     hourlyData,
 		LongerTermContext: longerTermData,
+		RangeState:        rangeState,
 	}, nil
 }
 
@@ -684,6 +709,125 @@ func Format(data *Data) string {
 	}
 
 	return sb.String()
+}
+
+func calculateRangeState(klines []Kline, atr float64, currentPrice float64) *RangeState {
+	if len(klines) == 0 || currentPrice <= 0 {
+		return nil
+	}
+
+	lookback := minInt(len(klines), 40)
+	subset := klines[len(klines)-lookback:]
+
+	high := subset[0].High
+	low := subset[0].Low
+	for _, k := range subset {
+		if k.High > high {
+			high = k.High
+		}
+		if k.Low < low {
+			low = k.Low
+		}
+	}
+
+	width := high - low
+	if width <= 0 {
+		return nil
+	}
+
+	mid := (high + low) / 2
+	widthPct := 0.0
+	if mid > 0 {
+		widthPct = (width / mid) * 100
+	}
+
+	widthToATR := 0.0
+	if atr > 0 {
+		widthToATR = width / atr
+	}
+
+	vwap := calculateVWAP(subset)
+
+	touchThreshold := math.Max(atr*0.3, width*0.05)
+	if touchThreshold == 0 {
+		touchThreshold = math.Max(high*0.001, currentPrice*0.001)
+	}
+
+	touchesHigh := 0
+	touchesLow := 0
+	for _, k := range subset {
+		if math.Abs(k.High-high) <= touchThreshold || math.Abs(k.Close-high) <= touchThreshold {
+			touchesHigh++
+		}
+		if math.Abs(k.Low-low) <= touchThreshold || math.Abs(k.Close-low) <= touchThreshold {
+			touchesLow++
+		}
+	}
+
+	distHighPct := 0.0
+	distLowPct := 0.0
+	if currentPrice > 0 {
+		distHighPct = ((high - currentPrice) / currentPrice) * 100
+		distLowPct = ((currentPrice - low) / currentPrice) * 100
+	}
+
+	priceLocation := "inside"
+	if currentPrice > high {
+		priceLocation = "above"
+	} else if currentPrice < low {
+		priceLocation = "below"
+	}
+
+	regime := "range"
+	if priceLocation == "above" {
+		regime = "breakout_up"
+	} else if priceLocation == "below" {
+		regime = "breakout_down"
+	} else if widthToATR <= 1.0 {
+		regime = "squeeze"
+	} else if touchesHigh <= 1 && touchesLow <= 1 {
+		regime = "trend_attempt"
+	}
+
+	return &RangeState{
+		Timeframe:         "15m",
+		LookbackCandles:   lookback,
+		LookbackMinutes:   lookback * 15,
+		High:              high,
+		Low:               low,
+		Mid:               mid,
+		Width:             width,
+		WidthPct:          widthPct,
+		ATR14:             atr,
+		WidthToATR14:      widthToATR,
+		VWAP:              vwap,
+		TouchesHigh:       touchesHigh,
+		TouchesLow:        touchesLow,
+		DistanceToHighPct: distHighPct,
+		DistanceToLowPct:  distLowPct,
+		PriceLocation:     priceLocation,
+		Regime:            regime,
+	}
+}
+
+func calculateVWAP(klines []Kline) float64 {
+	var pvSum, volSum float64
+	for _, k := range klines {
+		typical := (k.High + k.Low + k.Close) / 3
+		pvSum += typical * k.Volume
+		volSum += k.Volume
+	}
+	if volSum <= 0 {
+		return 0
+	}
+	return pvSum / volSum
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // formatFloatSlice 格式化float64切片为字符串
