@@ -776,17 +776,17 @@ func clampFloat(min, max, value float64) float64 {
 	return value
 }
 
-func (at *AutoTrader) applyOpenGuard(decision *decision.Decision, marketData *market.Data, side string) (time.Duration, string) {
+func (at *AutoTrader) applyOpenGuard(decision *decision.Decision, marketData *market.Data, side string) (time.Duration, string, error) {
 	minHold := 45 * time.Minute
 	strategy := "trend"
 
 	if marketData == nil {
-		return minHold, strategy
+		return minHold, strategy, nil
 	}
 
 	entryPrice := marketData.CurrentPrice
 	if entryPrice <= 0 {
-		return minHold, strategy
+		return minHold, strategy, nil
 	}
 
 	if marketData.RangeState != nil {
@@ -804,6 +804,16 @@ func (at *AutoTrader) applyOpenGuard(decision *decision.Decision, marketData *ma
 		}
 
 		if isRangeOpportunity {
+			confirmed := rs.TouchesHigh >= 3 && rs.TouchesLow >= 3 && rs.AgeBars1h >= 12
+			if rs.ADX144h > 0 && rs.ADX144h >= 20 {
+				confirmed = false
+			}
+
+			if !confirmed {
+				log.Printf("  🧭 守护拒绝: %s 区间信号尚未确认 (touch_high=%d touch_low=%d age_1h=%d adx4h=%.2f)", decision.Symbol, rs.TouchesHigh, rs.TouchesLow, rs.AgeBars1h, rs.ADX144h)
+				return 0, "range_unconfirmed", fmt.Errorf("range guard: %s 区间往返不足，等待更多4H确认", decision.Symbol)
+			}
+
 			strategy = "range"
 
 			// 根据区间寿命动态调整最小持仓时间，最多延长至 3 小时
@@ -849,10 +859,27 @@ func (at *AutoTrader) applyOpenGuard(decision *decision.Decision, marketData *ma
 					}
 				}
 			}
+
+			if decision.RiskUSD > 0 && decision.StopLoss > 0 {
+				riskDistance := math.Abs(entryPrice - decision.StopLoss)
+				if riskDistance > 0 {
+					allowedSize := (decision.RiskUSD * entryPrice) / riskDistance
+					if allowedSize > 0 && allowedSize < decision.PositionSizeUSD {
+						log.Printf("  🔧 执行守护: %s 调整仓位 %.2f -> %.2f 以维持风险 %.2f USD", decision.Symbol, decision.PositionSizeUSD, allowedSize, decision.RiskUSD)
+						decision.PositionSizeUSD = allowedSize
+					}
+				}
+			}
+
+			if decision.PositionSizeUSD <= 0 {
+				return 0, "range_unconfirmed", fmt.Errorf("range guard: %s 调整后仓位无效", decision.Symbol)
+			}
+
+			log.Printf("  🛡 执行守护: %s 设置最小持仓 %.0f 分钟 (策略=%s)", decision.Symbol, minHold.Minutes(), strategy)
+			return minHold, strategy, nil
 		}
 	}
 
-	// 根据最新止损距离调整仓位大小，保持 risk_usd 不变
 	if decision.RiskUSD > 0 && decision.StopLoss > 0 {
 		riskDistance := math.Abs(entryPrice - decision.StopLoss)
 		if riskDistance > 0 {
@@ -865,7 +892,7 @@ func (at *AutoTrader) applyOpenGuard(decision *decision.Decision, marketData *ma
 	}
 
 	log.Printf("  🛡 执行守护: %s 设置最小持仓 %.0f 分钟 (策略=%s)", decision.Symbol, minHold.Minutes(), strategy)
-	return minHold, strategy
+	return minHold, strategy, nil
 }
 
 func (at *AutoTrader) computeProfitProtectionThresholds(pos decision.PositionInfo, marketCache map[string]*market.Data) (profitProtectionThresholds, error) {
@@ -1404,7 +1431,10 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 		return err
 	}
 
-	minHoldDuration, guardStrategy := at.applyOpenGuard(decision, marketData, "long")
+	minHoldDuration, guardStrategy, guardErr := at.applyOpenGuard(decision, marketData, "long")
+	if guardErr != nil {
+		return guardErr
+	}
 	if decision.PositionSizeUSD <= 0 {
 		return fmt.Errorf("守护调整后仓位为0，取消开仓")
 	}
@@ -1431,7 +1461,11 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 	posKey := decision.Symbol + "_long"
 	at.positionFirstSeenTime[posKey] = time.Now().UnixMilli()
 	at.positionMinHoldUntil[posKey] = time.Now().Add(minHoldDuration)
-	at.positionGuardStrategy[posKey] = guardStrategy
+	if guardStrategy != "" {
+		at.positionGuardStrategy[posKey] = guardStrategy
+	} else {
+		at.positionGuardStrategy[posKey] = "trend"
+	}
 
 	// 设置止损止盈
 	if err := at.trader.SetStopLoss(decision.Symbol, "LONG", quantity, decision.StopLoss); err != nil {
@@ -1464,7 +1498,10 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
 		return err
 	}
 
-	minHoldDuration, guardStrategy := at.applyOpenGuard(decision, marketData, "short")
+	minHoldDuration, guardStrategy, guardErr := at.applyOpenGuard(decision, marketData, "short")
+	if guardErr != nil {
+		return guardErr
+	}
 	if decision.PositionSizeUSD <= 0 {
 		return fmt.Errorf("守护调整后仓位为0，取消开仓")
 	}
@@ -1491,7 +1528,11 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
 	posKey := decision.Symbol + "_short"
 	at.positionFirstSeenTime[posKey] = time.Now().UnixMilli()
 	at.positionMinHoldUntil[posKey] = time.Now().Add(minHoldDuration)
-	at.positionGuardStrategy[posKey] = guardStrategy
+	if guardStrategy != "" {
+		at.positionGuardStrategy[posKey] = guardStrategy
+	} else {
+		at.positionGuardStrategy[posKey] = "trend"
+	}
 
 	// 设置止损止盈
 	if err := at.trader.SetStopLoss(decision.Symbol, "SHORT", quantity, decision.StopLoss); err != nil {
