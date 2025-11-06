@@ -10,6 +10,7 @@ import (
 	"nofx/market"
 	"nofx/mcp"
 	"nofx/pool"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -90,6 +91,20 @@ const (
 	defaultEarlyProtectMaxHoldMinutes = 9    // 仅对9分钟内的新仓应用快速止盈
 )
 
+type positionTargetState struct {
+	Price    float64
+	Quantity float64
+	SizePct  float64
+	Kind     string
+	Filled   bool
+}
+
+type positionManagementState struct {
+	StopLoss        float64
+	InitialQuantity float64
+	Targets         []*positionTargetState
+}
+
 // AutoTrader 自动交易器
 type AutoTrader struct {
 	id                    string // Trader唯一标识
@@ -111,6 +126,7 @@ type AutoTrader struct {
 	positionPnLHigh       map[string]float64
 	positionMinHoldUntil  map[string]time.Time
 	positionGuardStrategy map[string]string
+	positionTargets       map[string]*positionManagementState
 	lastMarketData        map[string]*market.Data
 }
 
@@ -248,6 +264,7 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 		positionPnLHigh:       make(map[string]float64),
 		positionMinHoldUntil:  make(map[string]time.Time),
 		positionGuardStrategy: make(map[string]string),
+		positionTargets:       make(map[string]*positionManagementState),
 		lastMarketData:        make(map[string]*market.Data),
 	}, nil
 }
@@ -327,36 +344,30 @@ func (at *AutoTrader) runCycle() error {
 		return fmt.Errorf("构建交易上下文失败: %w", err)
 	}
 
-	// 保存账户状态快照
-	record.AccountState = logger.AccountSnapshot{
-		TotalBalance:          ctx.Account.TotalEquity,
-		AvailableBalance:      ctx.Account.AvailableBalance,
-		TotalUnrealizedProfit: ctx.Account.TotalPnL,
-		PositionCount:         ctx.Account.PositionCount,
-		MarginUsedPct:         ctx.Account.MarginUsedPct,
-	}
-
-	// 保存持仓快照
-	for _, pos := range ctx.Positions {
-		record.Positions = append(record.Positions, logger.PositionSnapshot{
-			Symbol:           pos.Symbol,
-			Side:             pos.Side,
-			PositionAmt:      pos.Quantity,
-			EntryPrice:       pos.EntryPrice,
-			MarkPrice:        pos.MarkPrice,
-			UnrealizedProfit: pos.UnrealizedPnL,
-			Leverage:         float64(pos.Leverage),
-			LiquidationPrice: pos.LiquidationPrice,
-		})
-	}
-
-	// 保存候选币种列表
-	for _, coin := range ctx.CandidateCoins {
-		record.CandidateCoins = append(record.CandidateCoins, coin.Symbol)
-	}
+	at.populateRecordFromContext(record, ctx)
 
 	log.Printf("📊 账户净值: %.2f USDT | 可用: %.2f USDT | 持仓: %d",
 		ctx.Account.TotalEquity, ctx.Account.AvailableBalance, ctx.Account.PositionCount)
+
+	// 分批止盈管理：优先处理既有持仓的目标落袋
+	if managed, err := at.applyTargetManagement(ctx, record); err != nil {
+		record.Success = false
+		record.ErrorMessage = fmt.Sprintf("执行分批止盈管理失败: %v", err)
+		at.decisionLogger.LogDecision(record)
+		return fmt.Errorf("执行分批止盈管理失败: %w", err)
+	} else if managed {
+		// 分批止盈可能改变仓位，重新获取上下文
+		ctx, err = at.buildTradingContext()
+		if err != nil {
+			record.Success = false
+			record.ErrorMessage = fmt.Sprintf("分批止盈后刷新上下文失败: %v", err)
+			at.decisionLogger.LogDecision(record)
+			return fmt.Errorf("分批止盈后刷新上下文失败: %w", err)
+		}
+		at.populateRecordFromContext(record, ctx)
+		log.Printf("📊 分批止盈后账户净值: %.2f USDT | 可用: %.2f USDT | 持仓: %d",
+			ctx.Account.TotalEquity, ctx.Account.AvailableBalance, ctx.Account.PositionCount)
+	}
 
 	// 4. 盈利回撤保护：在请求AI前先执行强制止盈检查
 	if handled, err := at.applyProfitProtection(ctx, record); err != nil {
@@ -534,6 +545,35 @@ func (at *AutoTrader) runCycle() error {
 	return nil
 }
 
+func (at *AutoTrader) populateRecordFromContext(record *logger.DecisionRecord, ctx *decision.Context) {
+	record.AccountState = logger.AccountSnapshot{
+		TotalBalance:          ctx.Account.TotalEquity,
+		AvailableBalance:      ctx.Account.AvailableBalance,
+		TotalUnrealizedProfit: ctx.Account.TotalPnL,
+		PositionCount:         ctx.Account.PositionCount,
+		MarginUsedPct:         ctx.Account.MarginUsedPct,
+	}
+
+	record.Positions = record.Positions[:0]
+	for _, pos := range ctx.Positions {
+		record.Positions = append(record.Positions, logger.PositionSnapshot{
+			Symbol:           pos.Symbol,
+			Side:             pos.Side,
+			PositionAmt:      pos.Quantity,
+			EntryPrice:       pos.EntryPrice,
+			MarkPrice:        pos.MarkPrice,
+			UnrealizedProfit: pos.UnrealizedPnL,
+			Leverage:         float64(pos.Leverage),
+			LiquidationPrice: pos.LiquidationPrice,
+		})
+	}
+
+	record.CandidateCoins = record.CandidateCoins[:0]
+	for _, coin := range ctx.CandidateCoins {
+		record.CandidateCoins = append(record.CandidateCoins, coin.Symbol)
+	}
+}
+
 // buildTradingContext 构建交易上下文
 func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 	// 1. 获取账户信息
@@ -657,6 +697,11 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		if !currentPositionKeys[key] {
 			delete(at.positionMinHoldUntil, key)
 			delete(at.positionGuardStrategy, key)
+		}
+	}
+	for key := range at.positionTargets {
+		if !currentPositionKeys[key] {
+			delete(at.positionTargets, key)
 		}
 	}
 
@@ -895,6 +940,110 @@ func (at *AutoTrader) applyOpenGuard(decision *decision.Decision, marketData *ma
 	return minHold, strategy, nil
 }
 
+func (at *AutoTrader) registerPositionTargets(decision *decision.Decision, quantity, entryPrice float64, side string) {
+	posKey := decision.Symbol + "_" + side
+
+	if quantity <= 0 {
+		delete(at.positionTargets, posKey)
+		return
+	}
+
+	targets := make([]*positionTargetState, 0, len(decision.TakeProfitTargets)+1)
+	remaining := quantity
+
+	if len(decision.TakeProfitTargets) > 0 {
+		for _, tp := range decision.TakeProfitTargets {
+			if tp.Price <= 0 {
+				continue
+			}
+
+			fraction := tp.SizePct
+			if fraction <= 0 && tp.SizeUSD > 0 && decision.PositionSizeUSD > 0 {
+				fraction = tp.SizeUSD / decision.PositionSizeUSD
+			}
+			if fraction <= 0 {
+				continue
+			}
+
+			portion := fraction * quantity
+			if portion > remaining {
+				portion = remaining
+			}
+			if portion <= 0 {
+				continue
+			}
+
+			targets = append(targets, &positionTargetState{
+				Price:    tp.Price,
+				Quantity: portion,
+				SizePct:  portion / quantity,
+				Kind:     tp.Kind,
+			})
+			remaining -= portion
+			if remaining <= quantity*0.001 {
+				remaining = 0
+				break
+			}
+		}
+	}
+
+	if remaining > 0 {
+		if decision.TakeProfit > 0 {
+			targets = append(targets, &positionTargetState{
+				Price:    decision.TakeProfit,
+				Quantity: remaining,
+				SizePct:  remaining / quantity,
+				Kind:     "final",
+			})
+			remaining = 0
+		} else if len(targets) > 0 {
+			last := targets[len(targets)-1]
+			last.Quantity += remaining
+			last.SizePct = last.Quantity / quantity
+			remaining = 0
+		}
+	}
+
+	if len(targets) == 0 && decision.TakeProfit > 0 {
+		targets = append(targets, &positionTargetState{
+			Price:    decision.TakeProfit,
+			Quantity: quantity,
+			SizePct:  1.0,
+			Kind:     "final",
+		})
+	}
+
+	if len(targets) == 0 {
+		delete(at.positionTargets, posKey)
+		return
+	}
+
+	if side == "long" {
+		sort.Slice(targets, func(i, j int) bool {
+			return targets[i].Price < targets[j].Price
+		})
+	} else {
+		sort.Slice(targets, func(i, j int) bool {
+			return targets[i].Price > targets[j].Price
+		})
+	}
+
+	at.positionTargets[posKey] = &positionManagementState{
+		StopLoss:        decision.StopLoss,
+		InitialQuantity: quantity,
+		Targets:         targets,
+	}
+
+	for _, tgt := range targets {
+		tag := tgt.Kind
+		if tag == "" {
+			tag = "partial"
+		}
+		log.Printf("  🎯 分批止盈计划: %s %s [%s] 目标价%.4f 覆盖≈%.1f%% (%.4f)",
+			decision.Symbol, side, tag, tgt.Price, tgt.SizePct*100, tgt.Quantity)
+	}
+}
+
 func (at *AutoTrader) computeProfitProtectionThresholds(pos decision.PositionInfo, marketCache map[string]*market.Data) (profitProtectionThresholds, error) {
 	thresholds := profitProtectionThresholds{
 		activationPct: defaultProfitProtectActivationPct,
@@ -968,6 +1117,207 @@ func extractAtrPercent(data *market.Data) float64 {
 	}
 
 	return 0
+}
+
+// applyTargetManagement 执行分批止盈管理（命中目标价时部分平仓）
+func (at *AutoTrader) applyTargetManagement(ctx *decision.Context, record *logger.DecisionRecord) (bool, error) {
+	if len(at.positionTargets) == 0 || ctx == nil {
+		return false, nil
+	}
+
+	managed := false
+	priceCache := make(map[string]*market.Data)
+	const qtyTolerance = 1e-6
+
+	for _, pos := range ctx.Positions {
+		posKey := pos.Symbol + "_" + pos.Side
+		state, ok := at.positionTargets[posKey]
+		if !ok || state == nil || len(state.Targets) == 0 {
+			continue
+		}
+
+		currentQty := pos.Quantity
+		if currentQty < 0 {
+			currentQty = math.Abs(currentQty)
+		}
+		if currentQty <= qtyTolerance {
+			continue
+		}
+
+		data, cached := priceCache[pos.Symbol]
+		if !cached {
+			md, err := market.Get(pos.Symbol)
+			if err != nil {
+				log.Printf("⚠️  获取 %s 市场数据失败（跳过分批止盈检查）: %v", pos.Symbol, err)
+			} else {
+				data = md
+			}
+			priceCache[pos.Symbol] = data
+		}
+
+		price := pos.MarkPrice
+		if data != nil && data.CurrentPrice > 0 {
+			price = data.CurrentPrice
+		}
+		if price <= 0 {
+			continue
+		}
+
+		cancelledOrders := false
+		executedThisRound := false
+		remainingQty := currentQty
+
+		for _, target := range state.Targets {
+			if target == nil || target.Filled {
+				continue
+			}
+
+			triggered := false
+			switch pos.Side {
+			case "long":
+				if target.Price > 0 && price >= target.Price {
+					triggered = true
+				}
+			case "short":
+				if target.Price > 0 && price <= target.Price {
+					triggered = true
+				}
+			}
+			if !triggered {
+				continue
+			}
+
+			if !cancelledOrders {
+				if err := at.trader.CancelAllOrders(pos.Symbol); err != nil {
+					log.Printf("  ⚠ 取消 %s 未完成委托失败: %v", pos.Symbol, err)
+				}
+				cancelledOrders = true
+			}
+
+			// 若这是最后一个未完成目标，则覆盖为剩余全部仓位
+			isLast := true
+			for _, other := range state.Targets {
+				if other == nil || other == target || other.Filled {
+					continue
+				}
+				isLast = false
+				break
+			}
+
+			qtyToClose := target.Quantity
+			if qtyToClose > remainingQty || isLast {
+				qtyToClose = remainingQty
+			}
+			if qtyToClose <= qtyTolerance {
+				target.Filled = true
+				continue
+			}
+
+			action := "close_long_partial"
+			if pos.Side == "short" {
+				action = "close_short_partial"
+			}
+
+			actionRecord := logger.DecisionAction{
+				Action:    action,
+				Symbol:    pos.Symbol,
+				Quantity:  qtyToClose,
+				Leverage:  pos.Leverage,
+				Price:     price,
+				Timestamp: time.Now(),
+			}
+
+			var (
+				order map[string]interface{}
+				err   error
+			)
+
+			if pos.Side == "long" {
+				order, err = at.trader.CloseLong(pos.Symbol, qtyToClose)
+			} else {
+				order, err = at.trader.CloseShort(pos.Symbol, qtyToClose)
+			}
+
+			if err != nil {
+				log.Printf("❌ 分批止盈失败: %s %s 目标价%.4f 错误: %v", pos.Symbol, pos.Side, target.Price, err)
+				actionRecord.Success = false
+				actionRecord.Error = err.Error()
+				record.Decisions = append(record.Decisions, actionRecord)
+				record.ExecutionLog = append(record.ExecutionLog,
+					fmt.Sprintf("❌ 分批止盈失败: %s %s 目标价%.4f -> %v", pos.Symbol, pos.Side, target.Price, err))
+				continue
+			}
+
+			if orderID, ok := extractOrderID(order); ok {
+				actionRecord.OrderID = orderID
+			}
+			actionRecord.Success = true
+			record.Decisions = append(record.Decisions, actionRecord)
+
+			tag := target.Kind
+			if tag == "" {
+				tag = "partial"
+			}
+			executedPct := 0.0
+			if state.InitialQuantity > 0 {
+				executedPct = (qtyToClose / state.InitialQuantity) * 100
+			} else if target.SizePct > 0 {
+				executedPct = target.SizePct * 100
+			}
+			log.Printf("  ✓ 分批止盈: %s %s [%s] 目标价%.4f 平仓 %.4f (≈%.1f%%)", pos.Symbol, pos.Side, tag, target.Price, qtyToClose, executedPct)
+			record.ExecutionLog = append(record.ExecutionLog,
+				fmt.Sprintf("✓ 分批止盈: %s %s [%s] 目标价%.4f 平仓%.4f (≈%.1f%%)",
+					pos.Symbol, pos.Side, tag, target.Price, qtyToClose, executedPct))
+
+			target.Filled = true
+			target.Quantity = qtyToClose
+			if state.InitialQuantity > 0 {
+				target.SizePct = qtyToClose / state.InitialQuantity
+			}
+
+			remainingQty -= qtyToClose
+			if remainingQty < 0 {
+				remainingQty = 0
+			}
+
+			executedThisRound = true
+			managed = true
+		}
+
+		if !executedThisRound {
+			continue
+		}
+
+		if remainingQty > qtyTolerance && state.StopLoss > 0 {
+			positionSide := "LONG"
+			if pos.Side == "short" {
+				positionSide = "SHORT"
+			}
+			if err := at.trader.SetStopLoss(pos.Symbol, positionSide, remainingQty, state.StopLoss); err != nil {
+				log.Printf("  ⚠ 重新设置止损失败: %v", err)
+				record.ExecutionLog = append(record.ExecutionLog,
+					fmt.Sprintf("⚠ 重新设置止损失败 %s %s: %v", pos.Symbol, pos.Side, err))
+			} else {
+				record.ExecutionLog = append(record.ExecutionLog,
+					fmt.Sprintf("🛡 重新设置止损: %s %s 剩余%.4f @ %.4f",
+						pos.Symbol, pos.Side, remainingQty, state.StopLoss))
+			}
+		}
+
+		if remainingQty <= qtyTolerance {
+			at.clearPositionState(posKey)
+		}
+	}
+
+	return managed, nil
+}
+
+func (at *AutoTrader) clearPositionState(posKey string) {
+	delete(at.positionTargets, posKey)
+	delete(at.positionMinHoldUntil, posKey)
+	delete(at.positionGuardStrategy, posKey)
+	delete(at.positionPnLHigh, posKey)
+	delete(at.positionFirstSeenTime, posKey)
 }
 
 func (at *AutoTrader) shouldTriggerEarlyProfitProtect(pos decision.PositionInfo, peakPnL, currentPnL float64) (bool, float64, float64, float64, float64) {
@@ -1109,10 +1459,7 @@ func (at *AutoTrader) applyProfitProtection(ctx *decision.Context, record *logge
 				record.ExecutionLog = append(record.ExecutionLog,
 					fmt.Sprintf("✓ 提前止盈平仓成功: %s %s 保留利润%.2f%% (锁定线%.2f%%)",
 						pos.Symbol, pos.Side, math.Max(currentPnL, 0), lockLevel))
-				delete(at.positionPnLHigh, posKey)
-				delete(at.positionFirstSeenTime, posKey)
-				delete(at.positionMinHoldUntil, posKey)
-				delete(at.positionGuardStrategy, posKey)
+				at.clearPositionState(posKey)
 			}
 
 			record.Decisions = append(record.Decisions, actionRecord)
@@ -1201,10 +1548,7 @@ func (at *AutoTrader) applyProfitProtection(ctx *decision.Context, record *logge
 				record.ExecutionLog = append(record.ExecutionLog,
 					fmt.Sprintf("✓ 盈利回撤保护平仓成功: %s %s 保留利润%.2f%% (锁定线%.2f%%)",
 						pos.Symbol, pos.Side, math.Max(currentPnL, 0), lockLevel))
-				delete(at.positionPnLHigh, posKey)
-				delete(at.positionFirstSeenTime, posKey)
-				delete(at.positionMinHoldUntil, posKey)
-				delete(at.positionGuardStrategy, posKey)
+				at.clearPositionState(posKey)
 			}
 
 			record.Decisions = append(record.Decisions, actionRecord)
@@ -1467,12 +1811,26 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 		at.positionGuardStrategy[posKey] = "trend"
 	}
 
+	if len(decision.TakeProfitTargets) > 0 {
+		at.registerPositionTargets(decision, quantity, marketData.CurrentPrice, "long")
+	} else {
+		delete(at.positionTargets, posKey)
+	}
+
 	// 设置止损止盈
 	if err := at.trader.SetStopLoss(decision.Symbol, "LONG", quantity, decision.StopLoss); err != nil {
 		log.Printf("  ⚠ 设置止损失败: %v", err)
 	}
-	if err := at.trader.SetTakeProfit(decision.Symbol, "LONG", quantity, decision.TakeProfit); err != nil {
-		log.Printf("  ⚠ 设置止盈失败: %v", err)
+	if len(decision.TakeProfitTargets) == 0 {
+		if decision.TakeProfit > 0 {
+			if err := at.trader.SetTakeProfit(decision.Symbol, "LONG", quantity, decision.TakeProfit); err != nil {
+				log.Printf("  ⚠ 设置止盈失败: %v", err)
+			}
+		}
+	} else {
+		if state, ok := at.positionTargets[posKey]; ok && state != nil {
+			log.Printf("  🎯 已加载 %d 个分批止盈目标，由守护层动态执行", len(state.Targets))
+		}
 	}
 
 	return nil
@@ -1534,12 +1892,26 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
 		at.positionGuardStrategy[posKey] = "trend"
 	}
 
+	if len(decision.TakeProfitTargets) > 0 {
+		at.registerPositionTargets(decision, quantity, marketData.CurrentPrice, "short")
+	} else {
+		delete(at.positionTargets, posKey)
+	}
+
 	// 设置止损止盈
 	if err := at.trader.SetStopLoss(decision.Symbol, "SHORT", quantity, decision.StopLoss); err != nil {
 		log.Printf("  ⚠ 设置止损失败: %v", err)
 	}
-	if err := at.trader.SetTakeProfit(decision.Symbol, "SHORT", quantity, decision.TakeProfit); err != nil {
-		log.Printf("  ⚠ 设置止盈失败: %v", err)
+	if len(decision.TakeProfitTargets) == 0 {
+		if decision.TakeProfit > 0 {
+			if err := at.trader.SetTakeProfit(decision.Symbol, "SHORT", quantity, decision.TakeProfit); err != nil {
+				log.Printf("  ⚠ 设置止盈失败: %v", err)
+			}
+		}
+	} else {
+		if state, ok := at.positionTargets[posKey]; ok && state != nil {
+			log.Printf("  🎯 已加载 %d 个分批止盈目标，由守护层动态执行", len(state.Targets))
+		}
 	}
 
 	return nil
@@ -1579,10 +1951,7 @@ func (at *AutoTrader) executeCloseLongWithRecord(decision *decision.Decision, ac
 	}
 
 	log.Printf("  ✓ 平仓成功")
-	delete(at.positionMinHoldUntil, posKey)
-	delete(at.positionGuardStrategy, posKey)
-	delete(at.positionPnLHigh, posKey)
-	delete(at.positionFirstSeenTime, posKey)
+	at.clearPositionState(posKey)
 	return nil
 }
 
@@ -1620,10 +1989,7 @@ func (at *AutoTrader) executeCloseShortWithRecord(decision *decision.Decision, a
 	}
 
 	log.Printf("  ✓ 平仓成功")
-	delete(at.positionMinHoldUntil, posKey)
-	delete(at.positionGuardStrategy, posKey)
-	delete(at.positionPnLHigh, posKey)
-	delete(at.positionFirstSeenTime, posKey)
+	at.clearPositionState(posKey)
 	return nil
 }
 

@@ -77,15 +77,24 @@ type Context struct {
 
 // Decision AI的交易决策
 type Decision struct {
-	Symbol          string  `json:"symbol"`
-	Action          string  `json:"action"` // "open_long", "open_short", "close_long", "close_short", "hold", "wait"
-	Leverage        int     `json:"leverage,omitempty"`
-	PositionSizeUSD float64 `json:"position_size_usd,omitempty"`
-	StopLoss        float64 `json:"stop_loss,omitempty"`
-	TakeProfit      float64 `json:"take_profit,omitempty"`
-	Confidence      int     `json:"confidence,omitempty"` // 信心度 (0-100)
-	RiskUSD         float64 `json:"risk_usd,omitempty"`   // 最大美元风险
-	Reasoning       string  `json:"reasoning"`
+	Symbol            string             `json:"symbol"`
+	Action            string             `json:"action"` // "open_long", "open_short", "close_long", "close_short", "hold", "wait"
+	Leverage          int                `json:"leverage,omitempty"`
+	PositionSizeUSD   float64            `json:"position_size_usd,omitempty"`
+	StopLoss          float64            `json:"stop_loss,omitempty"`
+	TakeProfit        float64            `json:"take_profit,omitempty"`
+	TakeProfitTargets []TakeProfitTarget `json:"tp_targets,omitempty"`
+	Confidence        int                `json:"confidence,omitempty"` // 信心度 (0-100)
+	RiskUSD           float64            `json:"risk_usd,omitempty"`   // 最大美元风险
+	Reasoning         string             `json:"reasoning"`
+}
+
+// TakeProfitTarget 分批止盈目标
+type TakeProfitTarget struct {
+	Price   float64 `json:"price"`
+	SizePct float64 `json:"size_pct,omitempty"`
+	SizeUSD float64 `json:"size_usd,omitempty"`
+	Kind    string  `json:"kind,omitempty"`
 }
 
 // RiskFlag 风险告警信息（用于风控复核）
@@ -1427,26 +1436,90 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 		if d.PositionSizeUSD <= 0 {
 			return fmt.Errorf("仓位大小必须大于0: %.2f", d.PositionSizeUSD)
 		}
-		// 验证仓位价值上限（加1%容差以避免浮点数精度问题）
-		tolerance := maxPositionValue * 0.01 // 1%容差
-		if d.PositionSizeUSD > maxPositionValue+tolerance {
-			log.Printf("⚠️  决策仓位超限: %s 请求 %.2f USDT，允许上限 %.2f USDT，自动收敛至上限", d.Symbol, d.PositionSizeUSD, maxPositionValue)
-			d.PositionSizeUSD = maxPositionValue
-		}
-		if d.StopLoss <= 0 || d.TakeProfit <= 0 {
-			return fmt.Errorf("止损和止盈必须大于0")
+		if d.StopLoss <= 0 {
+			return fmt.Errorf("止损必须大于0")
 		}
 
-		// 验证止损止盈的合理性
+		hasTargets := len(d.TakeProfitTargets) > 0
+		if !hasTargets && d.TakeProfit <= 0 {
+			return fmt.Errorf("必须提供有效的止盈价格 (take_profit 或 tp_targets)")
+		}
+
+		if hasTargets && d.PositionSizeUSD <= 0 {
+			return fmt.Errorf("提供 tp_targets 时 position_size_usd 必须大于0")
+		}
+
+		if hasTargets {
+			remainingFraction := 1.0
+			totalFraction := 0.0
+			for i := range d.TakeProfitTargets {
+				target := &d.TakeProfitTargets[i]
+				if target.Price <= 0 {
+					return fmt.Errorf("tp_targets[%d].price 必须大于0", i)
+				}
+
+				fraction := target.SizePct
+				if fraction < 0 {
+					return fmt.Errorf("tp_targets[%d].size_pct 不能为负数", i)
+				}
+				if fraction == 0 && target.SizeUSD > 0 && d.PositionSizeUSD > 0 {
+					fraction = target.SizeUSD / d.PositionSizeUSD
+				}
+				if fraction > remainingFraction {
+					fraction = remainingFraction
+				}
+				if fraction < 0 {
+					fraction = 0
+				}
+
+				target.SizePct = fraction
+				totalFraction += fraction
+				remainingFraction -= fraction
+				if remainingFraction < 0 {
+					remainingFraction = 0
+				}
+			}
+
+			if totalFraction > 1.02 {
+				return fmt.Errorf("tp_targets 分配比例合计%.1f%%，不得超过100%%", totalFraction*100)
+			}
+		}
+
+		takeProfitForRisk := d.TakeProfit
+		if hasTargets {
+			if d.Action == "open_long" {
+				for _, target := range d.TakeProfitTargets {
+					if target.Price > takeProfitForRisk {
+						takeProfitForRisk = target.Price
+					}
+				}
+			} else {
+				if takeProfitForRisk <= 0 && len(d.TakeProfitTargets) > 0 {
+					takeProfitForRisk = d.TakeProfitTargets[0].Price
+				}
+				for _, target := range d.TakeProfitTargets {
+					if target.Price < takeProfitForRisk {
+						takeProfitForRisk = target.Price
+					}
+				}
+			}
+		}
+
+		if takeProfitForRisk <= 0 {
+			return fmt.Errorf("缺少有效的止盈价格")
+		}
+
+		// 验证止损止盈的合理性（使用最终止盈价）
 		if d.Action == "open_long" {
-			if d.StopLoss >= d.TakeProfit {
+			if d.StopLoss >= takeProfitForRisk {
 				return fmt.Errorf("做多时止损价必须小于止盈价")
 			}
 		} else {
-			if d.StopLoss <= d.TakeProfit {
+			if d.StopLoss <= takeProfitForRisk {
 				return fmt.Errorf("做空时止损价必须大于止盈价")
 			}
 		}
+		d.TakeProfit = takeProfitForRisk
 
 		// 验证风险回报比（默认最低≥1:1.8，趋势脚本可在上层再做更严格的判断）
 		// 计算入场价（假设当前市价）
@@ -1457,6 +1530,39 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 		} else {
 			// 做空：入场价在止损和止盈之间
 			entryPrice = d.StopLoss - (d.StopLoss-d.TakeProfit)*0.2 // 假设在20%位置入场
+		}
+
+		// 仓位上限和风险预算收敛
+		tolerance := maxPositionValue * 0.01 // 1%容差
+		if d.PositionSizeUSD > maxPositionValue+tolerance {
+			log.Printf("⚠️  决策仓位超限: %s 请求 %.2f USDT，允许上限 %.2f USDT，自动收敛", d.Symbol, d.PositionSizeUSD, maxPositionValue)
+			d.PositionSizeUSD = maxPositionValue
+		}
+
+		if d.RiskUSD > 0 {
+			riskBudget := accountEquity * 0.03
+			maxRisk := riskBudget * 1.5
+			if d.RiskUSD > maxRisk {
+				if d.RiskUSD > riskBudget*3 {
+					return fmt.Errorf("risk_usd %.2f 远超预算 %.2f，拒绝执行", d.RiskUSD, riskBudget)
+				}
+				log.Printf("⚠️  决策risk_usd超限: %s 请求 %.2f USD，预算 %.2f USD，放大上限 %.2f USD，自动收敛", d.Symbol, d.RiskUSD, riskBudget, maxRisk)
+				d.RiskUSD = maxRisk
+			} else if d.RiskUSD > riskBudget {
+				log.Printf("⚠️  决策risk_usd高于预算: %s 请求 %.2f USD，预算 %.2f USD，自动收敛到预算", d.Symbol, d.RiskUSD, riskBudget)
+				d.RiskUSD = riskBudget
+			}
+
+			if d.StopLoss > 0 && d.PositionSizeUSD > 0 {
+				riskDistance := math.Abs(d.StopLoss - entryPrice)
+				if riskDistance > 0 {
+					maxPosition := (d.RiskUSD * entryPrice) / riskDistance
+					if maxPosition > 0 && d.PositionSizeUSD > maxPosition {
+						log.Printf("  🔧 risk守护: %s 调整仓位 %.2f -> %.2f 以维持风险 %.2f USD", d.Symbol, d.PositionSizeUSD, maxPosition, d.RiskUSD)
+						d.PositionSizeUSD = maxPosition
+					}
+				}
+			}
 		}
 
 		var riskPercent, rewardPercent, riskRewardRatio float64
