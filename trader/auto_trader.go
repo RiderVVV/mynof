@@ -1208,29 +1208,61 @@ func (at *AutoTrader) applyOpenGuard(decision *decision.Decision, marketData *ma
 				log.Printf("  ⚠ 策略hint=range 但当前价格不在区间边界附近，降级为 transitional (price_location=%s)", rs.PriceLocation)
 				strategy = "transitional"
 			} else {
-				confirmed := rs.TouchesHigh >= 3 && rs.TouchesLow >= 3 && rs.AgeBars1h >= 12
-				if rs.ADX144h > 0 && rs.ADX144h >= 20 {
-					confirmed = false
-				}
+				touchesOk := rs.TouchesHigh >= 3 && rs.TouchesLow >= 3
+				ageMature := rs.AgeBars1h >= 12
+				ageDeveloping := rs.AgeBars1h >= 10
+				adxMature := rs.ADX144h <= 0 || rs.ADX144h < 20
+				adxDeveloping := rs.ADX144h <= 0 || rs.ADX144h < 25
 
-				if !confirmed {
-					log.Printf("  🧭 守护拒绝: %s 区间信号尚未确认 (touch_high=%d touch_low=%d age_1h=%d adx4h=%.2f)", decision.Symbol, rs.TouchesHigh, rs.TouchesLow, rs.AgeBars1h, rs.ADX144h)
-					return 0, "range_unconfirmed", fmt.Errorf("range guard: %s 区间往返不足，等待更多4H确认", decision.Symbol)
+				isMatureRange := touchesOk && ageMature && adxMature
+				isDevelopingRange := touchesOk && ageDeveloping && adxDeveloping
+
+				if !isMatureRange {
+					if !isDevelopingRange {
+						log.Printf("  🧭 守护拒绝: %s 区间信号尚未确认 (touch_high=%d touch_low=%d age_1h=%d adx4h=%.2f)", decision.Symbol, rs.TouchesHigh, rs.TouchesLow, rs.AgeBars1h, rs.ADX144h)
+						return 0, "range_unconfirmed", fmt.Errorf("range guard: %s 区间往返不足或ADX过高", decision.Symbol)
+					}
+
+					log.Printf("  ⚠ 区间处于形成阶段: %s touch_high=%d touch_low=%d age_1h=%d adx4h=%.2f，缩减风险后允许尝试", decision.Symbol, rs.TouchesHigh, rs.TouchesLow, rs.AgeBars1h, rs.ADX144h)
+					strategy = "range_developing"
+
+					if minHold < 90*time.Minute {
+						minHold = 90 * time.Minute
+					}
+					if decision.RiskUSD > 0 {
+						reduced := decision.RiskUSD * 0.6
+						if reduced < decision.RiskUSD {
+							log.Printf("  🔧 开发中区间: 调整 risk_usd %.2f -> %.2f", decision.RiskUSD, reduced)
+							decision.RiskUSD = reduced
+						}
+					}
+					if decision.PositionSizeUSD > 0 {
+						reduced := decision.PositionSizeUSD * 0.75
+						if reduced < decision.PositionSizeUSD {
+							log.Printf("  🔧 开发中区间: 调整仓位 %.2f -> %.2f", decision.PositionSizeUSD, reduced)
+							decision.PositionSizeUSD = reduced
+						}
+					}
+				} else {
+					strategy = "range"
 				}
 
 				// 根据区间寿命动态调整最小持仓时间，最多延长至 3 小时
-				minHold = 45 * time.Minute
+				baseHold := 45 * time.Minute
 				if rs.AgeBars1h >= 6 {
-					minHold = 90 * time.Minute
+					baseHold = 90 * time.Minute
 				}
 				if rs.AgeBars1h >= 12 {
-					minHold = 120 * time.Minute
+					baseHold = 120 * time.Minute
 				}
 				if rs.AgeBars1h >= 18 {
-					minHold = 150 * time.Minute
+					baseHold = 150 * time.Minute
 				}
-				if minHold > 180*time.Minute {
-					minHold = 180 * time.Minute
+				if baseHold > 180*time.Minute {
+					baseHold = 180 * time.Minute
+				}
+				if baseHold > minHold {
+					minHold = baseHold
 				}
 
 				bufferMultiplier := 0.3 + 0.05*rs.WidthToATR14
