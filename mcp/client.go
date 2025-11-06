@@ -21,14 +21,15 @@ const (
 
 // Client AI API配置
 type Client struct {
-	Provider     Provider
-	APIKey       string
-	SecretKey    string // 阿里云需要
-	BaseURL      string
-	Model        string
-	Timeout      time.Duration
-	UseFullURL   bool // 是否使用完整URL（不添加/chat/completions）
-	ExtraHeaders map[string]string
+	Provider        Provider
+	APIKey          string
+	SecretKey       string // 阿里云需要
+	BaseURL         string
+	Model           string
+	Timeout         time.Duration
+	UseFullURL      bool // 是否使用完整URL（不添加/chat/completions）
+	ExtraHeaders    map[string]string
+	ForceJSONSchema bool
 }
 
 func New() *Client {
@@ -76,6 +77,7 @@ func (cfg *Client) SetCustomAPI(apiURL, apiKey, modelName string) {
 	cfg.Model = modelName
 	cfg.Timeout = 120 * time.Second
 	cfg.ExtraHeaders = nil
+	cfg.ForceJSONSchema = strings.Contains(strings.ToLower(apiURL), "openrouter.ai")
 }
 
 // SetClient 设置完整的AI配置（高级用户）
@@ -163,6 +165,27 @@ func (cfg *Client) callOnce(systemPrompt, userPrompt string) (string, error) {
 		"messages":    messages,
 		"temperature": 0.5, // 降低temperature以提高JSON格式稳定性
 		"max_tokens":  2000,
+	}
+	if cfg.ForceJSONSchema {
+		requestBody["response_format"] = map[string]interface{}{
+			"type": "json_schema",
+			"json_schema": map[string]interface{}{
+				"name": "decision_array",
+				"schema": map[string]interface{}{
+					"type": "array",
+					"items": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"symbol":    map[string]interface{}{"type": "string"},
+							"action":    map[string]interface{}{"type": "string"},
+							"reasoning": map[string]interface{}{"type": "string"},
+						},
+						"required":             []string{"symbol", "action", "reasoning"},
+						"additionalProperties": true,
+					},
+				},
+			},
+		}
 	}
 
 	// 注意：response_format 参数仅 OpenAI 支持，DeepSeek/Qwen 不支持
