@@ -170,19 +170,26 @@ func (cfg *Client) callOnce(systemPrompt, userPrompt string) (string, error) {
 		requestBody["response_format"] = map[string]interface{}{
 			"type": "json_schema",
 			"json_schema": map[string]interface{}{
-				"name": "decision_array",
+				"name": "decision_payload",
 				"schema": map[string]interface{}{
-					"type": "array",
-					"items": map[string]interface{}{
-						"type": "object",
-						"properties": map[string]interface{}{
-							"symbol":    map[string]interface{}{"type": "string"},
-							"action":    map[string]interface{}{"type": "string"},
-							"reasoning": map[string]interface{}{"type": "string"},
+					"type": "object",
+					"properties": map[string]interface{}{
+						"decisions": map[string]interface{}{
+							"type": "array",
+							"items": map[string]interface{}{
+								"type": "object",
+								"properties": map[string]interface{}{
+									"symbol":    map[string]interface{}{"type": "string"},
+									"action":    map[string]interface{}{"type": "string"},
+									"reasoning": map[string]interface{}{"type": "string"},
+								},
+								"required":             []string{"symbol", "action", "reasoning"},
+								"additionalProperties": true,
+							},
 						},
-						"required":             []string{"symbol", "action", "reasoning"},
-						"additionalProperties": true,
 					},
+					"required":             []string{"decisions"},
+					"additionalProperties": true,
 				},
 			},
 		}

@@ -1,6 +1,7 @@
 package decision
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -1499,18 +1500,27 @@ func extractCoTTrace(response string) string {
 // extractDecisions 提取JSON决策列表
 func extractDecisions(response string) ([]Decision, error) {
 	// 直接查找JSON数组 - 找第一个完整的JSON数组
-	arrayStart := strings.Index(response, "[")
+	trimmed := strings.TrimSpace(response)
+	if trimmed == "" {
+		return nil, fmt.Errorf("AI响应为空")
+	}
+
+	if strings.HasPrefix(trimmed, "{") {
+		return extractDecisionsFromObject(trimmed)
+	}
+
+	arrayStart := strings.Index(trimmed, "[")
 	if arrayStart == -1 {
 		return nil, fmt.Errorf("无法找到JSON数组起始")
 	}
 
 	// 从 [ 开始，匹配括号找到对应的 ]
-	arrayEnd := findMatchingBracket(response, arrayStart)
+	arrayEnd := findMatchingBracket(trimmed, arrayStart)
 	if arrayEnd == -1 {
 		return nil, fmt.Errorf("无法找到JSON数组结束")
 	}
 
-	jsonContent := strings.TrimSpace(response[arrayStart : arrayEnd+1])
+	jsonContent := strings.TrimSpace(trimmed[arrayStart : arrayEnd+1])
 
 	// 🔧 修复常见的JSON格式错误：缺少引号的字段值
 	// 匹配: "reasoning": 内容"}  或  "reasoning": 内容}  (没有引号)
@@ -1525,6 +1535,53 @@ func extractDecisions(response string) ([]Decision, error) {
 	}
 
 	return decisions, nil
+}
+
+func extractDecisionsFromObject(s string) ([]Decision, error) {
+	type wrapper struct {
+		Decisions json.RawMessage `json:"decisions"`
+		Result    json.RawMessage `json:"result"`
+		Response  json.RawMessage `json:"response"`
+		Data      json.RawMessage `json:"data"`
+	}
+
+	var w wrapper
+	if err := json.Unmarshal([]byte(s), &w); err != nil {
+		return nil, fmt.Errorf("JSON解析失败: %w", err)
+	}
+
+	raw := w.Decisions
+	if len(raw) == 0 {
+		raw = firstNonEmptyRaw(w.Result, w.Response, w.Data)
+	}
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("对象中未找到 decisions 数组")
+	}
+
+	trimmed := strings.TrimSpace(string(raw))
+	if len(trimmed) == 0 {
+		return nil, fmt.Errorf("decisions 数组为空")
+	}
+
+	if !strings.HasPrefix(trimmed, "[") {
+		return nil, fmt.Errorf("decisions 字段不是数组")
+	}
+
+	var decisions []Decision
+	if err := json.Unmarshal(raw, &decisions); err != nil {
+		return nil, fmt.Errorf("JSON解析失败: %w\nJSON内容: %s", err, trimmed)
+	}
+
+	return decisions, nil
+}
+
+func firstNonEmptyRaw(raws ...json.RawMessage) json.RawMessage {
+	for _, raw := range raws {
+		if len(bytes.TrimSpace(raw)) > 0 {
+			return raw
+		}
+	}
+	return nil
 }
 
 // fixMissingQuotes 替换中文引号为英文引号（避免输入法自动转换）

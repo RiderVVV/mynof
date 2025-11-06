@@ -112,6 +112,7 @@
   - 开仓须另含：`leverage`, `position_size_usd`, `stop_loss`, `take_profit`, `risk_usd`, `confidence`  
   - 可选：`tp_targets`（数组，元素含 `price`、`size_pct` / `size_usd`、`kind`，用于描述分批止盈）  
   - 推荐：`strategy_hint`（`"range"` / `"trend"` / `"transitional"`），用于告诉守护层执行脚本类型  
+  - 若 `auxiliary_opinions` 非空，必须在思维链中逐条评估：说明各模型的结论是否一致、是否采纳（需给出接受或拒绝理由），最终 JSON 必须体现你的独立判断而非简单照搬。  
   - 行动集合：`open_long`, `open_short`, `close_long`, `close_short`, `hold`, `wait`
 
 示例：
