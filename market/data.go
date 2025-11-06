@@ -805,7 +805,19 @@ func calculateRangeState(klines15m []Kline, klines1h []Kline, klines4h []Kline, 
 		}
 	}
 
-	ageBars1h := int(math.Max(1, math.Round(float64(lookback)*15.0/60.0)))
+	ageBars1h := 0
+	if len(klines1h) > 0 {
+		for i := len(klines1h) - 1; i >= 0; i-- {
+			c := klines1h[i]
+			if c.High > high+touchThreshold || c.Low < low-touchThreshold {
+				break
+			}
+			ageBars1h++
+		}
+	}
+	if ageBars1h == 0 {
+		ageBars1h = int(math.Max(1, math.Round(float64(lookback)*15.0/60.0)))
+	}
 	adx4h := calculateADX(klines4h, 14)
 	bbp1h := calculateBollingerPercent(klines1h, 20)
 
