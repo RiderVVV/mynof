@@ -109,6 +109,9 @@ type AutoTrader struct {
 	callCount             int              // AI调用次数
 	positionFirstSeenTime map[string]int64 // 持仓首次出现时间 (symbol_side -> timestamp毫秒)
 	positionPnLHigh       map[string]float64
+	positionMinHoldUntil  map[string]time.Time
+	positionGuardStrategy map[string]string
+	lastMarketData        map[string]*market.Data
 }
 
 type profitProtectionThresholds struct {
@@ -243,6 +246,9 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 		isRunning:             false,
 		positionFirstSeenTime: make(map[string]int64),
 		positionPnLHigh:       make(map[string]float64),
+		positionMinHoldUntil:  make(map[string]time.Time),
+		positionGuardStrategy: make(map[string]string),
+		lastMarketData:        make(map[string]*market.Data),
 	}, nil
 }
 
@@ -647,6 +653,12 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 			delete(at.positionPnLHigh, key)
 		}
 	}
+	for key := range at.positionMinHoldUntil {
+		if !currentPositionKeys[key] {
+			delete(at.positionMinHoldUntil, key)
+			delete(at.positionGuardStrategy, key)
+		}
+	}
 
 	// 3. 获取合并的候选币种池（AI500 + OI Top，去重）
 	// 无论有没有持仓，都分析相同数量的币种（让AI看到所有好机会）
@@ -762,6 +774,98 @@ func clampFloat(min, max, value float64) float64 {
 		return max
 	}
 	return value
+}
+
+func (at *AutoTrader) applyOpenGuard(decision *decision.Decision, marketData *market.Data, side string) (time.Duration, string) {
+	minHold := 45 * time.Minute
+	strategy := "trend"
+
+	if marketData == nil {
+		return minHold, strategy
+	}
+
+	entryPrice := marketData.CurrentPrice
+	if entryPrice <= 0 {
+		return minHold, strategy
+	}
+
+	if marketData.RangeState != nil {
+		rs := marketData.RangeState
+		isRangeOpportunity := false
+		switch side {
+		case "long":
+			if rs.PriceLocation == "near_low" || (rs.PriceLocation == "mid" && entryPrice <= rs.Mid) {
+				isRangeOpportunity = true
+			}
+		case "short":
+			if rs.PriceLocation == "near_high" || (rs.PriceLocation == "mid" && entryPrice >= rs.Mid) {
+				isRangeOpportunity = true
+			}
+		}
+
+		if isRangeOpportunity {
+			strategy = "range"
+
+			// 根据区间寿命动态调整最小持仓时间，最多延长至 3 小时
+			minHold = 45 * time.Minute
+			if rs.AgeBars1h >= 6 {
+				minHold = 90 * time.Minute
+			}
+			if rs.AgeBars1h >= 12 {
+				minHold = 120 * time.Minute
+			}
+			if rs.AgeBars1h >= 18 {
+				minHold = 150 * time.Minute
+			}
+			if minHold > 180*time.Minute {
+				minHold = 180 * time.Minute
+			}
+
+			bufferMultiplier := 0.3 + 0.05*rs.WidthToATR14
+			bufferMultiplier = clampFloat(0.3, 0.6, bufferMultiplier)
+			buffer := bufferMultiplier * rs.ATR14
+
+			if buffer > 0 {
+				switch side {
+				case "long":
+					desiredStop := entryPrice - buffer
+					if desiredStop > 0 && (decision.StopLoss <= 0 || decision.StopLoss > desiredStop) {
+						if decision.StopLoss > 0 {
+							log.Printf("  🔧 执行守护: %s 调整止损 %.4f -> %.4f (range buffer %.2fx ATR)", decision.Symbol, decision.StopLoss, desiredStop, bufferMultiplier)
+						} else {
+							log.Printf("  🔧 执行守护: %s 设置守护止损 %.4f (range buffer %.2fx ATR)", decision.Symbol, desiredStop, bufferMultiplier)
+						}
+						decision.StopLoss = desiredStop
+					}
+				case "short":
+					desiredStop := entryPrice + buffer
+					if desiredStop > 0 && (decision.StopLoss <= 0 || decision.StopLoss < desiredStop) {
+						if decision.StopLoss > 0 {
+							log.Printf("  🔧 执行守护: %s 调整止损 %.4f -> %.4f (range buffer %.2fx ATR)", decision.Symbol, decision.StopLoss, desiredStop, bufferMultiplier)
+						} else {
+							log.Printf("  🔧 执行守护: %s 设置守护止损 %.4f (range buffer %.2fx ATR)", decision.Symbol, desiredStop, bufferMultiplier)
+						}
+						decision.StopLoss = desiredStop
+					}
+				}
+			}
+		}
+	}
+
+	// 根据最新止损距离调整仓位大小，保持 risk_usd 不变
+	if decision.RiskUSD > 0 && decision.StopLoss > 0 {
+		riskDistance := math.Abs(entryPrice - decision.StopLoss)
+		if riskDistance > 0 {
+			allowedSize := (decision.RiskUSD * entryPrice) / riskDistance
+			if allowedSize > 0 && allowedSize < decision.PositionSizeUSD {
+				log.Printf("  🔧 执行守护: %s 调整仓位 %.2f -> %.2f 以维持风险 %.2f USD", decision.Symbol, decision.PositionSizeUSD, allowedSize, decision.RiskUSD)
+				decision.PositionSizeUSD = allowedSize
+			}
+		}
+	}
+
+	log.Printf("  🛡 执行守护: %s 设置最小持仓 %.0f 分钟 (策略=%s)", decision.Symbol, minHold.Minutes(), strategy)
+	return minHold, strategy
 }
 
 func (at *AutoTrader) computeProfitProtectionThresholds(pos decision.PositionInfo, marketCache map[string]*market.Data) (profitProtectionThresholds, error) {
@@ -980,6 +1084,8 @@ func (at *AutoTrader) applyProfitProtection(ctx *decision.Context, record *logge
 						pos.Symbol, pos.Side, math.Max(currentPnL, 0), lockLevel))
 				delete(at.positionPnLHigh, posKey)
 				delete(at.positionFirstSeenTime, posKey)
+				delete(at.positionMinHoldUntil, posKey)
+				delete(at.positionGuardStrategy, posKey)
 			}
 
 			record.Decisions = append(record.Decisions, actionRecord)
@@ -1070,6 +1176,8 @@ func (at *AutoTrader) applyProfitProtection(ctx *decision.Context, record *logge
 						pos.Symbol, pos.Side, math.Max(currentPnL, 0), lockLevel))
 				delete(at.positionPnLHigh, posKey)
 				delete(at.positionFirstSeenTime, posKey)
+				delete(at.positionMinHoldUntil, posKey)
+				delete(at.positionGuardStrategy, posKey)
 			}
 
 			record.Decisions = append(record.Decisions, actionRecord)
@@ -1296,7 +1404,12 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 		return err
 	}
 
-	// 计算数量
+	minHoldDuration, guardStrategy := at.applyOpenGuard(decision, marketData, "long")
+	if decision.PositionSizeUSD <= 0 {
+		return fmt.Errorf("守护调整后仓位为0，取消开仓")
+	}
+
+	// 计算数量（根据可能调整后的仓位大小）
 	quantity := decision.PositionSizeUSD / marketData.CurrentPrice
 	actionRecord.Quantity = quantity
 	actionRecord.Price = marketData.CurrentPrice
@@ -1317,6 +1430,8 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 	// 记录开仓时间
 	posKey := decision.Symbol + "_long"
 	at.positionFirstSeenTime[posKey] = time.Now().UnixMilli()
+	at.positionMinHoldUntil[posKey] = time.Now().Add(minHoldDuration)
+	at.positionGuardStrategy[posKey] = guardStrategy
 
 	// 设置止损止盈
 	if err := at.trader.SetStopLoss(decision.Symbol, "LONG", quantity, decision.StopLoss); err != nil {
@@ -1349,6 +1464,11 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
 		return err
 	}
 
+	minHoldDuration, guardStrategy := at.applyOpenGuard(decision, marketData, "short")
+	if decision.PositionSizeUSD <= 0 {
+		return fmt.Errorf("守护调整后仓位为0，取消开仓")
+	}
+
 	// 计算数量
 	quantity := decision.PositionSizeUSD / marketData.CurrentPrice
 	actionRecord.Quantity = quantity
@@ -1370,6 +1490,8 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
 	// 记录开仓时间
 	posKey := decision.Symbol + "_short"
 	at.positionFirstSeenTime[posKey] = time.Now().UnixMilli()
+	at.positionMinHoldUntil[posKey] = time.Now().Add(minHoldDuration)
+	at.positionGuardStrategy[posKey] = guardStrategy
 
 	// 设置止损止盈
 	if err := at.trader.SetStopLoss(decision.Symbol, "SHORT", quantity, decision.StopLoss); err != nil {
@@ -1385,6 +1507,17 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
 // executeCloseLongWithRecord 执行平多仓并记录详细信息
 func (at *AutoTrader) executeCloseLongWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
 	log.Printf("  🔄 平多仓: %s", decision.Symbol)
+
+	posKey := decision.Symbol + "_long"
+	if holdUntil, ok := at.positionMinHoldUntil[posKey]; ok {
+		if time.Now().Before(holdUntil) {
+			remaining := holdUntil.Sub(time.Now()).Minutes()
+			log.Printf("  ⚠ 执行守护: %s 多仓仍处于最小持仓窗口 (剩余 %.1f 分钟)，按AI指令提前平仓。", decision.Symbol, remaining)
+		}
+		if strat, ok := at.positionGuardStrategy[posKey]; ok {
+			log.Printf("  ℹ️ 守护策略类型: %s", strat)
+		}
+	}
 
 	// 获取当前价格
 	marketData, err := market.Get(decision.Symbol)
@@ -1405,12 +1538,27 @@ func (at *AutoTrader) executeCloseLongWithRecord(decision *decision.Decision, ac
 	}
 
 	log.Printf("  ✓ 平仓成功")
+	delete(at.positionMinHoldUntil, posKey)
+	delete(at.positionGuardStrategy, posKey)
+	delete(at.positionPnLHigh, posKey)
+	delete(at.positionFirstSeenTime, posKey)
 	return nil
 }
 
 // executeCloseShortWithRecord 执行平空仓并记录详细信息
 func (at *AutoTrader) executeCloseShortWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
 	log.Printf("  🔄 平空仓: %s", decision.Symbol)
+
+	posKey := decision.Symbol + "_short"
+	if holdUntil, ok := at.positionMinHoldUntil[posKey]; ok {
+		if time.Now().Before(holdUntil) {
+			remaining := holdUntil.Sub(time.Now()).Minutes()
+			log.Printf("  ⚠ 执行守护: %s 空仓仍处于最小持仓窗口 (剩余 %.1f 分钟)，按AI指令提前平仓。", decision.Symbol, remaining)
+		}
+		if strat, ok := at.positionGuardStrategy[posKey]; ok {
+			log.Printf("  ℹ️ 守护策略类型: %s", strat)
+		}
+	}
 
 	// 获取当前价格
 	marketData, err := market.Get(decision.Symbol)
@@ -1431,6 +1579,10 @@ func (at *AutoTrader) executeCloseShortWithRecord(decision *decision.Decision, a
 	}
 
 	log.Printf("  ✓ 平仓成功")
+	delete(at.positionMinHoldUntil, posKey)
+	delete(at.positionGuardStrategy, posKey)
+	delete(at.positionPnLHigh, posKey)
+	delete(at.positionFirstSeenTime, posKey)
 	return nil
 }
 
