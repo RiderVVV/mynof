@@ -84,6 +84,7 @@ type Decision struct {
 	StopLoss          float64            `json:"stop_loss,omitempty"`
 	TakeProfit        float64            `json:"take_profit,omitempty"`
 	TakeProfitTargets []TakeProfitTarget `json:"tp_targets,omitempty"`
+	StrategyHint      string             `json:"strategy_hint,omitempty"`
 	Confidence        int                `json:"confidence,omitempty"` // 信心度 (0-100)
 	RiskUSD           float64            `json:"risk_usd,omitempty"`   // 最大美元风险
 	Reasoning         string             `json:"reasoning"`
@@ -1406,6 +1407,21 @@ func findMatchingBracket(s string, start int) int {
 
 // validateDecision 验证单个决策的有效性
 func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoinLeverage int) error {
+	strategyHint := strings.ToLower(strings.TrimSpace(d.StrategyHint))
+	switch strategyHint {
+	case "", "auto":
+		strategyHint = ""
+	case "trend", "range":
+	case "transitional", "neutral", "balancing":
+		strategyHint = "transitional"
+	case "mean_reversion":
+		strategyHint = "range"
+	case "momentum":
+		strategyHint = "trend"
+	default:
+		return fmt.Errorf("strategy_hint 不支持的取值: %s", d.StrategyHint)
+	}
+
 	// 验证action
 	validActions := map[string]bool{
 		"open_long":   true,
@@ -1521,7 +1537,12 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 		}
 		d.TakeProfit = takeProfitForRisk
 
-		// 验证风险回报比（默认最低≥1:1.8，趋势脚本可在上层再做更严格的判断）
+		// range 策略必须提供分批止盈
+		if strategyHint == "range" && len(d.TakeProfitTargets) == 0 {
+			return fmt.Errorf("range 策略必须提供 tp_targets 用于分批止盈")
+		}
+
+		// 验证风险回报比（根据策略类型设置最低阈值）
 		// 计算入场价（假设当前市价）
 		var entryPrice float64
 		if d.Action == "open_long" {
@@ -1581,6 +1602,13 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 		}
 
 		minRiskReward := 1.8
+		switch strategyHint {
+		case "trend":
+			minRiskReward = 2.5
+		case "transitional":
+			minRiskReward = 2.0
+		}
+
 		if riskRewardRatio < minRiskReward {
 			return fmt.Errorf("风险回报比过低(%.2f:1)，必须≥%.1f:1 [风险:%.2f%% 收益:%.2f%%] [止损:%.2f 止盈:%.2f]",
 				riskRewardRatio, minRiskReward, riskPercent, rewardPercent, d.StopLoss, d.TakeProfit)

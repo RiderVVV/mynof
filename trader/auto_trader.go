@@ -821,9 +821,78 @@ func clampFloat(min, max, value float64) float64 {
 	return value
 }
 
+func classifyMarketRegime(data *market.Data) string {
+	if data == nil || data.RangeState == nil {
+		return "transitional"
+	}
+
+	rs := data.RangeState
+	if rs != nil {
+		if reg := strings.ToLower(strings.TrimSpace(rs.Regime)); reg != "" {
+			if strings.Contains(reg, "trend") {
+				return "trend"
+			}
+			if strings.Contains(reg, "range") {
+				return "range"
+			}
+		}
+
+		adx := rs.ADX144h
+		widthToATR := rs.WidthToATR14
+		touchesHigh := rs.TouchesHigh
+		touchesLow := rs.TouchesLow
+		age := rs.AgeBars1h
+
+		if adx >= 22 || (widthToATR > 0 && widthToATR < 2.2) {
+			return "trend"
+		}
+
+		if touchesHigh >= 3 && touchesLow >= 3 && age >= 12 && widthToATR >= 3.5 && (adx == 0 || adx <= 20) {
+			return "range"
+		}
+	}
+
+	return "transitional"
+}
+
+func normaliseStrategyHint(hint, regime string) string {
+	h := strings.ToLower(strings.TrimSpace(hint))
+	switch h {
+	case "", "auto":
+		return defaultStrategyFromRegime(regime)
+	case "trend", "range":
+		return h
+	case "transitional", "neutral", "balancing":
+		return "transitional"
+	case "mean_reversion":
+		return "range"
+	case "momentum":
+		return "trend"
+	default:
+		return defaultStrategyFromRegime(regime)
+	}
+}
+
+func defaultStrategyFromRegime(regime string) string {
+	switch strings.ToLower(strings.TrimSpace(regime)) {
+	case "trend", "trend_attempt", "strong_trend":
+		return "trend"
+	case "range", "range_tradable", "range_wide_enough":
+		return "range"
+	case "transitional", "transition":
+		return "transitional"
+	default:
+		return "transitional"
+	}
+}
+
 func (at *AutoTrader) applyOpenGuard(decision *decision.Decision, marketData *market.Data, side string) (time.Duration, string, error) {
 	minHold := 45 * time.Minute
-	strategy := "trend"
+	regime := classifyMarketRegime(marketData)
+	strategy := normaliseStrategyHint(decision.StrategyHint, regime)
+	if strategy == "" {
+		strategy = "transitional"
+	}
 
 	if marketData == nil {
 		return minHold, strategy, nil
@@ -834,94 +903,117 @@ func (at *AutoTrader) applyOpenGuard(decision *decision.Decision, marketData *ma
 		return minHold, strategy, nil
 	}
 
-	if marketData.RangeState != nil {
-		rs := marketData.RangeState
-		isRangeOpportunity := false
-		switch side {
-		case "long":
-			if rs.PriceLocation == "near_low" || (rs.PriceLocation == "mid" && entryPrice <= rs.Mid) {
-				isRangeOpportunity = true
+	if strategy == "range" {
+		if marketData.RangeState == nil {
+			log.Printf("  ⚠ 策略hint=range 但缺少 range_state，降级为 transitional")
+			strategy = "transitional"
+		} else {
+			rs := marketData.RangeState
+			isRangeOpportunity := false
+			switch side {
+			case "long":
+				if rs.PriceLocation == "near_low" || (rs.PriceLocation == "mid" && entryPrice <= rs.Mid) {
+					isRangeOpportunity = true
+				}
+			case "short":
+				if rs.PriceLocation == "near_high" || (rs.PriceLocation == "mid" && entryPrice >= rs.Mid) {
+					isRangeOpportunity = true
+				}
 			}
-		case "short":
-			if rs.PriceLocation == "near_high" || (rs.PriceLocation == "mid" && entryPrice >= rs.Mid) {
-				isRangeOpportunity = true
+
+			if !isRangeOpportunity {
+				log.Printf("  ⚠ 策略hint=range 但当前价格不在区间边界附近，降级为 transitional (price_location=%s)", rs.PriceLocation)
+				strategy = "transitional"
+			} else {
+				confirmed := rs.TouchesHigh >= 3 && rs.TouchesLow >= 3 && rs.AgeBars1h >= 12
+				if rs.ADX144h > 0 && rs.ADX144h >= 20 {
+					confirmed = false
+				}
+
+				if !confirmed {
+					log.Printf("  🧭 守护拒绝: %s 区间信号尚未确认 (touch_high=%d touch_low=%d age_1h=%d adx4h=%.2f)", decision.Symbol, rs.TouchesHigh, rs.TouchesLow, rs.AgeBars1h, rs.ADX144h)
+					return 0, "range_unconfirmed", fmt.Errorf("range guard: %s 区间往返不足，等待更多4H确认", decision.Symbol)
+				}
+
+				// 根据区间寿命动态调整最小持仓时间，最多延长至 3 小时
+				minHold = 45 * time.Minute
+				if rs.AgeBars1h >= 6 {
+					minHold = 90 * time.Minute
+				}
+				if rs.AgeBars1h >= 12 {
+					minHold = 120 * time.Minute
+				}
+				if rs.AgeBars1h >= 18 {
+					minHold = 150 * time.Minute
+				}
+				if minHold > 180*time.Minute {
+					minHold = 180 * time.Minute
+				}
+
+				bufferMultiplier := 0.3 + 0.05*rs.WidthToATR14
+				bufferMultiplier = clampFloat(0.3, 0.6, bufferMultiplier)
+				buffer := bufferMultiplier * rs.ATR14
+
+				if buffer > 0 {
+					switch side {
+					case "long":
+						desiredStop := entryPrice - buffer
+						if desiredStop > 0 && (decision.StopLoss <= 0 || decision.StopLoss > desiredStop) {
+							if decision.StopLoss > 0 {
+								log.Printf("  🔧 执行守护: %s 调整止损 %.4f -> %.4f (range buffer %.2fx ATR)", decision.Symbol, decision.StopLoss, desiredStop, bufferMultiplier)
+							} else {
+								log.Printf("  🔧 执行守护: %s 设置守护止损 %.4f (range buffer %.2fx ATR)", decision.Symbol, desiredStop, bufferMultiplier)
+							}
+							decision.StopLoss = desiredStop
+						}
+					case "short":
+						desiredStop := entryPrice + buffer
+						if desiredStop > 0 && (decision.StopLoss <= 0 || decision.StopLoss < desiredStop) {
+							if decision.StopLoss > 0 {
+								log.Printf("  🔧 执行守护: %s 调整止损 %.4f -> %.4f (range buffer %.2fx ATR)", decision.Symbol, decision.StopLoss, desiredStop, bufferMultiplier)
+							} else {
+								log.Printf("  🔧 执行守护: %s 设置守护止损 %.4f (range buffer %.2fx ATR)", decision.Symbol, desiredStop, bufferMultiplier)
+							}
+							decision.StopLoss = desiredStop
+						}
+					}
+				}
+
+				if decision.RiskUSD > 0 && decision.StopLoss > 0 {
+					riskDistance := math.Abs(entryPrice - decision.StopLoss)
+					if riskDistance > 0 {
+						allowedSize := (decision.RiskUSD * entryPrice) / riskDistance
+						if allowedSize > 0 && allowedSize < decision.PositionSizeUSD {
+							log.Printf("  🔧 执行守护: %s 调整仓位 %.2f -> %.2f 以维持风险 %.2f USD", decision.Symbol, decision.PositionSizeUSD, allowedSize, decision.RiskUSD)
+							decision.PositionSizeUSD = allowedSize
+						}
+					}
+				}
+
+				if decision.PositionSizeUSD <= 0 {
+					return 0, "range_unconfirmed", fmt.Errorf("range guard: %s 调整后仓位无效", decision.Symbol)
+				}
+
+				log.Printf("  🛡 执行守护: %s 设置最小持仓 %.0f 分钟 (策略=range)", decision.Symbol, minHold.Minutes())
+				return minHold, "range", nil
 			}
 		}
+	}
 
-		if isRangeOpportunity {
-			confirmed := rs.TouchesHigh >= 3 && rs.TouchesLow >= 3 && rs.AgeBars1h >= 12
-			if rs.ADX144h > 0 && rs.ADX144h >= 20 {
-				confirmed = false
-			}
+	if decision.StrategyHint != "" && strategy != strings.ToLower(strings.TrimSpace(regime)) && strategy != "transitional" {
+		log.Printf("  ℹ️ 策略hint=%s 与市场识别=%s，按hint执行", strategy, regime)
+	}
 
-			if !confirmed {
-				log.Printf("  🧭 守护拒绝: %s 区间信号尚未确认 (touch_high=%d touch_low=%d age_1h=%d adx4h=%.2f)", decision.Symbol, rs.TouchesHigh, rs.TouchesLow, rs.AgeBars1h, rs.ADX144h)
-				return 0, "range_unconfirmed", fmt.Errorf("range guard: %s 区间往返不足，等待更多4H确认", decision.Symbol)
-			}
-
-			strategy = "range"
-
-			// 根据区间寿命动态调整最小持仓时间，最多延长至 3 小时
-			minHold = 45 * time.Minute
-			if rs.AgeBars1h >= 6 {
-				minHold = 90 * time.Minute
-			}
-			if rs.AgeBars1h >= 12 {
-				minHold = 120 * time.Minute
-			}
-			if rs.AgeBars1h >= 18 {
-				minHold = 150 * time.Minute
-			}
-			if minHold > 180*time.Minute {
-				minHold = 180 * time.Minute
-			}
-
-			bufferMultiplier := 0.3 + 0.05*rs.WidthToATR14
-			bufferMultiplier = clampFloat(0.3, 0.6, bufferMultiplier)
-			buffer := bufferMultiplier * rs.ATR14
-
-			if buffer > 0 {
-				switch side {
-				case "long":
-					desiredStop := entryPrice - buffer
-					if desiredStop > 0 && (decision.StopLoss <= 0 || decision.StopLoss > desiredStop) {
-						if decision.StopLoss > 0 {
-							log.Printf("  🔧 执行守护: %s 调整止损 %.4f -> %.4f (range buffer %.2fx ATR)", decision.Symbol, decision.StopLoss, desiredStop, bufferMultiplier)
-						} else {
-							log.Printf("  🔧 执行守护: %s 设置守护止损 %.4f (range buffer %.2fx ATR)", decision.Symbol, desiredStop, bufferMultiplier)
-						}
-						decision.StopLoss = desiredStop
-					}
-				case "short":
-					desiredStop := entryPrice + buffer
-					if desiredStop > 0 && (decision.StopLoss <= 0 || decision.StopLoss < desiredStop) {
-						if decision.StopLoss > 0 {
-							log.Printf("  🔧 执行守护: %s 调整止损 %.4f -> %.4f (range buffer %.2fx ATR)", decision.Symbol, decision.StopLoss, desiredStop, bufferMultiplier)
-						} else {
-							log.Printf("  🔧 执行守护: %s 设置守护止损 %.4f (range buffer %.2fx ATR)", decision.Symbol, desiredStop, bufferMultiplier)
-						}
-						decision.StopLoss = desiredStop
-					}
-				}
-			}
-
-			if decision.RiskUSD > 0 && decision.StopLoss > 0 {
-				riskDistance := math.Abs(entryPrice - decision.StopLoss)
-				if riskDistance > 0 {
-					allowedSize := (decision.RiskUSD * entryPrice) / riskDistance
-					if allowedSize > 0 && allowedSize < decision.PositionSizeUSD {
-						log.Printf("  🔧 执行守护: %s 调整仓位 %.2f -> %.2f 以维持风险 %.2f USD", decision.Symbol, decision.PositionSizeUSD, allowedSize, decision.RiskUSD)
-						decision.PositionSizeUSD = allowedSize
-					}
-				}
-			}
-
-			if decision.PositionSizeUSD <= 0 {
-				return 0, "range_unconfirmed", fmt.Errorf("range guard: %s 调整后仓位无效", decision.Symbol)
-			}
-
-			log.Printf("  🛡 执行守护: %s 设置最小持仓 %.0f 分钟 (策略=%s)", decision.Symbol, minHold.Minutes(), strategy)
-			return minHold, strategy, nil
+	if strategy == "trend" {
+		if minHold < 60*time.Minute {
+			minHold = 60 * time.Minute
+		}
+		if marketData.RangeState != nil && marketData.RangeState.ADX144h >= 28 {
+			minHold = 90 * time.Minute
+		}
+	} else if strategy == "transitional" && regime == "range" {
+		if minHold < 60*time.Minute {
+			minHold = 60 * time.Minute
 		}
 	}
 
@@ -936,7 +1028,7 @@ func (at *AutoTrader) applyOpenGuard(decision *decision.Decision, marketData *ma
 		}
 	}
 
-	log.Printf("  🛡 执行守护: %s 设置最小持仓 %.0f 分钟 (策略=%s)", decision.Symbol, minHold.Minutes(), strategy)
+	log.Printf("  🛡 执行守护: %s 设置最小持仓 %.0f 分钟 (策略=%s, regime=%s)", decision.Symbol, minHold.Minutes(), strategy, regime)
 	return minHold, strategy, nil
 }
 

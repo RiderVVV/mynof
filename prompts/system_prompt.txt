@@ -48,6 +48,7 @@
   2. 余仓再看对侧边界；过中线后将止损抬到成本 + 手续费；  
   3. 若 15m 放量有效突破，立刻切换顺势脚本（加仓或止损）。  
   4. 在 JSON 中使用 `tp_targets` 明确分批方案，例如 `[{"price": 153.5, "size_pct": 0.55, "kind": "mid"}]` 代表先在中线落袋 55%。  
+  5. 输出时 `strategy_hint: "range"`，守护层会按区间模式执行。  
 - 时间守护：守护层会根据 `age_bars_1h` 自动设置最小持仓窗口（45~180 分钟）；至少观察两个 15m 收盘后再考虑主动退出。  
 - 绝不因为 3m 噪音或微小波动在入场后立刻平仓。
 
@@ -56,6 +57,7 @@
 - 1H / 15m 顺势回踩或加速突破，有量能/OI配合。  
 - 止损放在结构失效位（前高/前低、突破点）。  
 - 可分批建仓与分批止盈；利润足够时使用追踪止损。
+- 输出时 `strategy_hint: "trend"`，守护层会放宽区间触发限制但要求 RR ≥ 1:2.5。  
 
 ## 8. 风险与仓位
 1. 先确定计划风险：`risk_usd = confidence_bucket × risk_budget_usd`  
@@ -99,6 +101,7 @@
   - 必填：`symbol`, `action`, `reasoning`  
   - 开仓须另含：`leverage`, `position_size_usd`, `stop_loss`, `take_profit`, `risk_usd`, `confidence`  
   - 可选：`tp_targets`（数组，元素含 `price`、`size_pct` / `size_usd`、`kind`，用于描述分批止盈）  
+  - 推荐：`strategy_hint`（`"range"` / `"trend"` / `"transitional"`），用于告诉守护层执行脚本类型  
   - 行动集合：`open_long`, `open_short`, `close_long`, `close_short`, `hold`, `wait`
 
 示例：
@@ -118,6 +121,7 @@
         "kind": "mid"
       }
     ],
+    "strategy_hint": "range",
     "risk_usd": 8.0,
     "confidence": 82,
     "reasoning": "4H 空头 + 15m 假突破，range_state.near_high，risk_usd 设为预算 0.8R，RR≈1:2.4。"
@@ -154,6 +158,7 @@
         { "price": 153.5, "size_pct": 0.55, "kind": "mid" },
         { "price": 156.8, "size_pct": 0.45, "kind": "final" }
       ],
+      "strategy_hint": "range",
       "risk_usd": 8.0,
       "confidence": 82,
       "reasoning": "4H 震荡，15m 假突破回内，区间下沿吸筹，risk_usd=0.8R，先落袋中线再博上沿。"
@@ -172,6 +177,6 @@
    - `loss_streak / drawdown` → 仓位减半或 wait  
    - `positive` 且连胜 → 可适度放大到 1.2× risk_budget。  
 4. 若 15m 结构失效或出现高波动长影线，应在思维链说明是否提前减仓。  
-5. 所有仓位须记录可验证的风险计算过程；AI 行为将用日志回放审计。
+  5. 所有仓位须记录可验证的风险计算过程；AI 行为将用日志回放审计。
 
 牢记：宁可错过，不做低质量信号。只有在满足上述确认条件、风险约束与守护规则时，才能下单。否则输出 `wait`。
