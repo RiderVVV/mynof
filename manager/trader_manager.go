@@ -69,6 +69,27 @@ func (tm *TraderManager) AddTrader(cfg config.TraderConfig, coinPoolURL string, 
 		EarlyProfitMaxHoldMinutes: cfg.EarlyProfitMaxHoldMinutes,
 	}
 
+	if len(cfg.Ensemble.Models) > 0 {
+		traderConfig.EnsembleMode = cfg.Ensemble.Mode
+		traderConfig.EnsembleSummaryMode = cfg.Ensemble.SummaryMode
+		traderConfig.EnsembleModels = make([]trader.EnsembleModelConfig, 0, len(cfg.Ensemble.Models))
+		for _, model := range cfg.Ensemble.Models {
+			traderConfig.EnsembleModels = append(traderConfig.EnsembleModels, trader.EnsembleModelConfig{
+				ID:                   model.ID,
+				Label:                model.Label,
+				AIModel:              model.AIModel,
+				CustomAPIURL:         model.CustomAPIURL,
+				CustomAPIKey:         model.CustomAPIKey,
+				CustomModelName:      model.CustomModelName,
+				CustomAPIHTTPReferer: model.CustomAPIHTTPReferer,
+				CustomAPIXTitle:      model.CustomAPIXTitle,
+				Weight:               model.Weight,
+				Role:                 model.Role,
+				Notes:                model.Notes,
+			})
+		}
+	}
+
 	// 创建trader实例
 	at, err := trader.NewAutoTrader(traderConfig)
 	if err != nil {

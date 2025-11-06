@@ -8,6 +8,28 @@ import (
 	"time"
 )
 
+// EnsembleModelConfig 辅助模型配置
+type EnsembleModelConfig struct {
+	ID                   string  `json:"id"`
+	Label                string  `json:"label,omitempty"`
+	AIModel              string  `json:"ai_model,omitempty"` // 默认 custom
+	CustomAPIURL         string  `json:"custom_api_url,omitempty"`
+	CustomAPIKey         string  `json:"custom_api_key,omitempty"`
+	CustomModelName      string  `json:"custom_model_name,omitempty"`
+	CustomAPIHTTPReferer string  `json:"custom_api_http_referer,omitempty"`
+	CustomAPIXTitle      string  `json:"custom_api_x_title,omitempty"`
+	Weight               float64 `json:"weight,omitempty"`
+	Role                 string  `json:"role,omitempty"`
+	Notes                string  `json:"notes,omitempty"`
+}
+
+// EnsembleConfig 多模型集成配置
+type EnsembleConfig struct {
+	Mode        string                `json:"mode,omitempty"`         // majority/weighted/cascade ...
+	SummaryMode string                `json:"summary_mode,omitempty"` // 简单描述模式
+	Models      []EnsembleModelConfig `json:"models,omitempty"`
+}
+
 // TraderConfig 单个trader的配置
 type TraderConfig struct {
 	ID      string `json:"id"`
@@ -42,6 +64,8 @@ type TraderConfig struct {
 	CustomModelName      string `json:"custom_model_name,omitempty"`
 	CustomAPIHTTPReferer string `json:"custom_api_http_referer,omitempty"`
 	CustomAPIXTitle      string `json:"custom_api_x_title,omitempty"`
+
+	Ensemble EnsembleConfig `json:"ensemble,omitempty"`
 
 	InitialBalance      float64 `json:"initial_balance"`
 	ScanIntervalMinutes int     `json:"scan_interval_minutes"`
@@ -207,6 +231,50 @@ func (c *Config) Validate() error {
 		}
 		if trader.EarlyProfitMaxHoldMinutes < 0 {
 			return fmt.Errorf("trader[%d]: early_profit_max_hold_minutes不能小于0", i)
+		}
+
+		if len(trader.Ensemble.Models) > 0 {
+			seenModelIDs := make(map[string]bool)
+			for j, model := range trader.Ensemble.Models {
+				if model.ID == "" {
+					return fmt.Errorf("trader[%d]: ensemble.models[%d] id不能为空", i, j)
+				}
+				if seenModelIDs[model.ID] {
+					return fmt.Errorf("trader[%d]: ensemble.models[%d] id '%s' 重复", i, j, model.ID)
+				}
+				seenModelIDs[model.ID] = true
+
+				aiModel := strings.TrimSpace(model.AIModel)
+				if aiModel == "" {
+					aiModel = "custom"
+				}
+				switch aiModel {
+				case "custom":
+					apiURL := model.CustomAPIURL
+					apiKey := model.CustomAPIKey
+					modelName := model.CustomModelName
+					if apiURL == "" && trader.CustomAPIURL == "" {
+						return fmt.Errorf("trader[%d]: ensemble.models[%d] 使用custom模型时必须配置custom_api_url", i, j)
+					}
+					if apiKey == "" && trader.CustomAPIKey == "" {
+						return fmt.Errorf("trader[%d]: ensemble.models[%d] 使用custom模型时必须配置custom_api_key", i, j)
+					}
+					if modelName == "" && trader.CustomModelName == "" {
+						return fmt.Errorf("trader[%d]: ensemble.models[%d] 使用custom模型时必须配置custom_model_name", i, j)
+					}
+					if strings.Contains(apiURL, "openrouter.ai") || strings.Contains(trader.CustomAPIURL, "openrouter.ai") {
+						if model.CustomAPIHTTPReferer == "" && model.CustomAPIXTitle == "" &&
+							trader.CustomAPIHTTPReferer == "" && trader.CustomAPIXTitle == "" {
+							return fmt.Errorf("trader[%d]: ensemble.models[%d] 使用OpenRouter时必须配置custom_api_http_referer或custom_api_x_title", i, j)
+						}
+					}
+				default:
+					return fmt.Errorf("trader[%d]: ensemble.models[%d] 不支持的ai_model '%s'，目前仅支持'custom'", i, j, aiModel)
+				}
+				if model.Weight < 0 {
+					return fmt.Errorf("trader[%d]: ensemble.models[%d] weight不能为负数", i, j)
+				}
+			}
 		}
 	}
 

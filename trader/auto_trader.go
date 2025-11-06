@@ -54,6 +54,10 @@ type AutoTraderConfig struct {
 	CustomAPIHTTPReferer string
 	CustomAPIXTitle      string
 
+	EnsembleMode        string
+	EnsembleSummaryMode string
+	EnsembleModels      []EnsembleModelConfig
+
 	// 扫描配置
 	ScanInterval time.Duration // 扫描间隔（建议3分钟）
 
@@ -76,6 +80,32 @@ type AutoTraderConfig struct {
 	EarlyProfitMinRetracePct  float64 // 回撤的最小绝对值阈值（百分比）
 	EarlyProfitRetentionRatio float64 // 至少保留的峰值利润比例（0-1），低于该水平触发止盈
 	EarlyProfitMaxHoldMinutes int     // 仅对持仓时间少于该分钟数的仓位启用（<=0 表示不限制）
+}
+
+// EnsembleModelConfig 定义辅助模型的API参数
+type EnsembleModelConfig struct {
+	ID                   string
+	Label                string
+	AIModel              string
+	CustomAPIURL         string
+	CustomAPIKey         string
+	CustomModelName      string
+	CustomAPIHTTPReferer string
+	CustomAPIXTitle      string
+	Weight               float64
+	Role                 string
+	Notes                string
+}
+
+type ensembleModel struct {
+	id        string
+	label     string
+	role      string
+	weight    float64
+	provider  string
+	modelName string
+	client    *mcp.Client
+	notes     string
 }
 
 const (
@@ -126,6 +156,9 @@ type AutoTrader struct {
 	positionPnLHigh       map[string]float64
 	positionMinHoldUntil  map[string]time.Time
 	positionGuardStrategy map[string]string
+	ensembleMode          string
+	ensembleSummaryMode   string
+	ensembleModels        []ensembleModel
 	positionTargets       map[string]*positionManagementState
 	lastMarketData        map[string]*market.Data
 }
@@ -242,6 +275,30 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 		}
 	}
 
+	ensembleMode := strings.TrimSpace(config.EnsembleMode)
+	if ensembleMode == "" {
+		ensembleMode = "majority"
+	}
+	ensembleSummaryMode := strings.TrimSpace(config.EnsembleSummaryMode)
+
+	var ensembleModels []ensembleModel
+	if len(config.EnsembleModels) > 0 {
+		ensembleModels = make([]ensembleModel, 0, len(config.EnsembleModels))
+		for _, modelCfg := range config.EnsembleModels {
+			em, err := initEnsembleModel(config, modelCfg)
+			if err != nil {
+				return nil, fmt.Errorf("[%s] 初始化辅助模型失败 (%s): %w", config.Name, modelCfg.ID, err)
+			}
+			ensembleModels = append(ensembleModels, em)
+			logLabel := em.label
+			if logLabel == "" {
+				logLabel = em.id
+			}
+			log.Printf("🧠 [%s] 注册辅助模型: %s (provider=%s, model=%s, weight=%.2f)", config.Name, logLabel, em.provider, em.modelName, em.weight)
+		}
+		log.Printf("🧠 [%s] 启用多模型模式: %s（辅助模型 %d 个）", config.Name, ensembleMode, len(ensembleModels))
+	}
+
 	// 初始化决策日志记录器（使用trader ID创建独立目录）
 	logDir := fmt.Sprintf("decision_logs/%s", config.ID)
 	decisionLogger := logger.NewDecisionLogger(logDir)
@@ -264,8 +321,88 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 		positionPnLHigh:       make(map[string]float64),
 		positionMinHoldUntil:  make(map[string]time.Time),
 		positionGuardStrategy: make(map[string]string),
+		ensembleMode:          ensembleMode,
+		ensembleSummaryMode:   ensembleSummaryMode,
+		ensembleModels:        ensembleModels,
 		positionTargets:       make(map[string]*positionManagementState),
 		lastMarketData:        make(map[string]*market.Data),
+	}, nil
+}
+
+func initEnsembleModel(parent AutoTraderConfig, cfg EnsembleModelConfig) (ensembleModel, error) {
+	if cfg.ID == "" {
+		return ensembleModel{}, fmt.Errorf("ensemble model id 未配置")
+	}
+
+	aiModel := strings.TrimSpace(cfg.AIModel)
+	if aiModel == "" {
+		aiModel = "custom"
+	}
+
+	label := strings.TrimSpace(cfg.Label)
+	if label == "" {
+		label = cfg.ID
+	}
+
+	weight := cfg.Weight
+	if weight <= 0 {
+		weight = 1.0
+	}
+
+	client := mcp.New()
+	provider := aiModel
+	modelName := ""
+
+	switch aiModel {
+	case "custom":
+		apiURL := strings.TrimSpace(cfg.CustomAPIURL)
+		if apiURL == "" {
+			apiURL = strings.TrimSpace(parent.CustomAPIURL)
+		}
+		apiKey := strings.TrimSpace(cfg.CustomAPIKey)
+		if apiKey == "" {
+			apiKey = strings.TrimSpace(parent.CustomAPIKey)
+		}
+		modelName = strings.TrimSpace(cfg.CustomModelName)
+		if modelName == "" {
+			modelName = strings.TrimSpace(parent.CustomModelName)
+		}
+		if apiURL == "" || apiKey == "" || modelName == "" {
+			return ensembleModel{}, fmt.Errorf("custom 模型缺少 api_url/api_key/model_name 配置")
+		}
+		client.SetCustomAPI(apiURL, apiKey, modelName)
+
+		referer := strings.TrimSpace(cfg.CustomAPIHTTPReferer)
+		if referer == "" {
+			referer = strings.TrimSpace(parent.CustomAPIHTTPReferer)
+		}
+		xTitle := strings.TrimSpace(cfg.CustomAPIXTitle)
+		if xTitle == "" {
+			xTitle = strings.TrimSpace(parent.CustomAPIXTitle)
+		}
+		if referer != "" || xTitle != "" {
+			headers := make(map[string]string, 2)
+			if referer != "" {
+				headers["HTTP-Referer"] = referer
+			}
+			if xTitle != "" {
+				headers["X-Title"] = xTitle
+			}
+			client.SetExtraHeaders(headers)
+		}
+	default:
+		return ensembleModel{}, fmt.Errorf("暂不支持的辅助模型 ai_model '%s'", aiModel)
+	}
+
+	return ensembleModel{
+		id:        cfg.ID,
+		label:     label,
+		role:      strings.TrimSpace(cfg.Role),
+		weight:    weight,
+		provider:  provider,
+		modelName: modelName,
+		client:    client,
+		notes:     strings.TrimSpace(cfg.Notes),
 	}, nil
 }
 
@@ -382,6 +519,19 @@ func (at *AutoTrader) runCycle() error {
 			log.Printf("⚠ 保存决策记录失败: %v", logErr)
 		}
 		return nil
+	}
+
+	if len(at.ensembleModels) > 0 {
+		auxOpinions := at.collectAuxOpinions(ctx, record)
+		if len(auxOpinions) > 0 {
+			ctx.AuxOpinions = auxOpinions
+			ctx.EnsembleMode = at.ensembleMode
+			ctx.EnsembleSummary = at.ensembleSummaryMode
+		} else {
+			ctx.AuxOpinions = nil
+			ctx.EnsembleMode = ""
+			ctx.EnsembleSummary = ""
+		}
 	}
 
 	// 5. 调用AI获取完整决策
@@ -543,6 +693,139 @@ func (at *AutoTrader) runCycle() error {
 	}
 
 	return nil
+}
+
+func (at *AutoTrader) collectAuxOpinions(ctx *decision.Context, record *logger.DecisionRecord) []decision.AuxOpinion {
+	opinions := make([]decision.AuxOpinion, 0, len(at.ensembleModels))
+	if len(at.ensembleModels) == 0 {
+		return opinions
+	}
+
+	for _, model := range at.ensembleModels {
+		displayName := model.label
+		if displayName == "" {
+			displayName = model.id
+		}
+
+		ctxCopy := *ctx
+		ctxCopy.AuxOpinions = nil
+
+		fd, err := decision.GetFullDecision(&ctxCopy, model.client)
+		if err != nil {
+			msg := fmt.Sprintf("⚠️ 辅助模型 %s 调用失败: %v", displayName, err)
+			log.Println(msg)
+			if record != nil {
+				record.ExecutionLog = append(record.ExecutionLog, msg)
+			}
+			continue
+		}
+
+		opinion := summariseAuxDecision(model, fd, at.ensembleSummaryMode)
+		opinions = append(opinions, opinion)
+
+		msg := fmt.Sprintf("🧠 辅助模型 %s 建议: %s", displayName, opinion.Summary)
+		log.Println(msg)
+		if record != nil {
+			record.ExecutionLog = append(record.ExecutionLog, msg)
+		}
+	}
+
+	return opinions
+}
+
+func summariseAuxDecision(model ensembleModel, fd *decision.FullDecision, summaryMode string) decision.AuxOpinion {
+	mode := strings.ToLower(strings.TrimSpace(summaryMode))
+	var summary string
+
+	switch mode {
+	case "cot":
+		summary = clipString(fd.CoTTrace, 360)
+	case "mixed":
+		summary = summariseDecisionList(fd.Decisions)
+		if summary == "" {
+			summary = clipString(fd.CoTTrace, 360)
+		}
+	default: // decisions
+		summary = summariseDecisionList(fd.Decisions)
+		if summary == "" {
+			summary = clipString(fd.CoTTrace, 360)
+		}
+	}
+
+	if summary == "" {
+		summary = "无明确操作建议（wait）"
+	}
+
+	return decision.AuxOpinion{
+		ModelID:   model.id,
+		ModelName: model.label,
+		Provider:  model.provider,
+		Weight:    model.weight,
+		Role:      model.role,
+		Summary:   summary,
+		Decisions: fd.Decisions,
+		Notes:     model.notes,
+	}
+}
+
+func summariseDecisionList(decisions []decision.Decision) string {
+	if len(decisions) == 0 {
+		return ""
+	}
+
+	lines := make([]string, 0, 3)
+	count := 0
+	total := len(decisions)
+
+	for _, d := range decisions {
+		if strings.EqualFold(d.Symbol, "MARKET") && (d.Action == "wait" || d.Action == "hold") {
+			continue
+		}
+		desc := fmt.Sprintf("%s %s", d.Action, d.Symbol)
+		if d.StrategyHint != "" {
+			desc += fmt.Sprintf(" [%s]", d.StrategyHint)
+		}
+		if d.Confidence > 0 {
+			desc += fmt.Sprintf(" conf=%d", d.Confidence)
+		}
+		if d.RiskUSD > 0 {
+			desc += fmt.Sprintf(" risk=%.2f", d.RiskUSD)
+		}
+		lines = append(lines, desc)
+		count++
+		if count >= 3 {
+			break
+		}
+	}
+
+	if len(lines) == 0 {
+		return ""
+	}
+
+	summary := strings.Join(lines, "; ")
+	if total > count {
+		summary += fmt.Sprintf("; …总计%d条建议", total)
+	}
+
+	return summary
+}
+
+func clipString(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return ""
+	}
+	runes := []rune(trimmed)
+	if len(runes) <= max {
+		return trimmed
+	}
+	if max <= 1 {
+		return string(runes[:1])
+	}
+	return string(runes[:max-1]) + "…"
 }
 
 func (at *AutoTrader) populateRecordFromContext(record *logger.DecisionRecord, ctx *decision.Context) {

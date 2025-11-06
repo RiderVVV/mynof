@@ -10,6 +10,7 @@ import (
 	"nofx/pool"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -71,6 +72,9 @@ type Context struct {
 	Performance      interface{}              `json:"-"` // 历史表现分析（logger.PerformanceAnalysis）
 	BTCETHLeverage   int                      `json:"-"` // BTC/ETH杠杆倍数（从配置读取）
 	AltcoinLeverage  int                      `json:"-"` // 山寨币杠杆倍数（从配置读取）
+	AuxOpinions      []AuxOpinion             `json:"-"` // 辅助模型意见
+	EnsembleMode     string                   `json:"-"`
+	EnsembleSummary  string                   `json:"-"`
 	RecentRiskAlerts []RiskFlag               `json:"-"`
 	RecentGuardrails []MarketGuardrailWarning `json:"-"`
 }
@@ -90,12 +94,72 @@ type Decision struct {
 	Reasoning         string             `json:"reasoning"`
 }
 
+type decisionAlias Decision
+
+func (d *Decision) UnmarshalJSON(data []byte) error {
+	type raw struct {
+		*decisionAlias
+		Leverage interface{} `json:"leverage"`
+	}
+
+	aux := &raw{
+		decisionAlias: (*decisionAlias)(d),
+	}
+
+	if err := json.Unmarshal(data, aux); err != nil {
+		return err
+	}
+
+	if aux.Leverage == nil {
+		return nil
+	}
+
+	switch v := aux.Leverage.(type) {
+	case float64:
+		d.Leverage = int(math.Round(v))
+	case json.Number:
+		if f, err := v.Float64(); err == nil {
+			d.Leverage = int(math.Round(f))
+		}
+	case int:
+		d.Leverage = v
+	case int64:
+		d.Leverage = int(v)
+	case uint64:
+		d.Leverage = int(v)
+	case string:
+		if num, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil {
+			d.Leverage = int(math.Round(num))
+		}
+	default:
+		// 保持原值，不抛错
+	}
+
+	if d.Leverage < 0 {
+		d.Leverage = 0
+	}
+
+	return nil
+}
+
 // TakeProfitTarget 分批止盈目标
 type TakeProfitTarget struct {
 	Price   float64 `json:"price"`
 	SizePct float64 `json:"size_pct,omitempty"`
 	SizeUSD float64 `json:"size_usd,omitempty"`
 	Kind    string  `json:"kind,omitempty"`
+}
+
+// AuxOpinion 辅助模型意见
+type AuxOpinion struct {
+	ModelID   string     `json:"model_id"`
+	ModelName string     `json:"model_name,omitempty"`
+	Provider  string     `json:"provider,omitempty"`
+	Weight    float64    `json:"weight,omitempty"`
+	Role      string     `json:"role,omitempty"`
+	Summary   string     `json:"summary,omitempty"`
+	Decisions []Decision `json:"decisions,omitempty"`
+	Notes     string     `json:"notes,omitempty"`
 }
 
 // RiskFlag 风险告警信息（用于风控复核）
@@ -601,6 +665,31 @@ type promptMarket struct {
 	GuardrailWarnings []MarketGuardrailWarning `json:"guardrail_warnings,omitempty"`
 }
 
+type promptAuxOpinion struct {
+	ModelID   string            `json:"model_id"`
+	ModelName string            `json:"model_name,omitempty"`
+	Provider  string            `json:"provider,omitempty"`
+	Weight    float64           `json:"weight,omitempty"`
+	Role      string            `json:"role,omitempty"`
+	Summary   string            `json:"summary,omitempty"`
+	Votes     []promptAuxAction `json:"votes,omitempty"`
+	Notes     string            `json:"notes,omitempty"`
+}
+
+type promptAuxAction struct {
+	Symbol       string  `json:"symbol"`
+	Action       string  `json:"action"`
+	StrategyHint string  `json:"strategy_hint,omitempty"`
+	Confidence   int     `json:"confidence,omitempty"`
+	RiskUSD      float64 `json:"risk_usd,omitempty"`
+	Reasoning    string  `json:"reasoning,omitempty"`
+}
+
+type promptEnsembleMeta struct {
+	Mode        string `json:"mode"`
+	SummaryMode string `json:"summary_mode,omitempty"`
+}
+
 type promptSnapshot struct {
 	Runtime           promptRuntime            `json:"runtime"`
 	Account           promptAccount            `json:"account"`
@@ -611,6 +700,8 @@ type promptSnapshot struct {
 	CandidatePriority []string                 `json:"candidate_priority,omitempty"`
 	RecentRiskAlerts  []RiskFlag               `json:"recent_risk_alerts,omitempty"`
 	RecentGuardrails  []MarketGuardrailWarning `json:"recent_guardrails,omitempty"`
+	AuxOpinions       []promptAuxOpinion       `json:"auxiliary_opinions,omitempty"`
+	EnsembleMeta      *promptEnsembleMeta      `json:"ensemble_meta,omitempty"`
 }
 
 func buildPromptSnapshot(ctx *Context) promptSnapshot {
@@ -700,6 +791,14 @@ func buildPromptSnapshot(ctx *Context) promptSnapshot {
 		marketSnapshots = []promptMarket{}
 	}
 
+	var ensembleMeta *promptEnsembleMeta
+	if ctx.EnsembleMode != "" || ctx.EnsembleSummary != "" {
+		ensembleMeta = &promptEnsembleMeta{
+			Mode:        ctx.EnsembleMode,
+			SummaryMode: ctx.EnsembleSummary,
+		}
+	}
+
 	return promptSnapshot{
 		Runtime:           runtime,
 		Account:           account,
@@ -710,6 +809,8 @@ func buildPromptSnapshot(ctx *Context) promptSnapshot {
 		CandidatePriority: candidateOrder,
 		RecentRiskAlerts:  ctx.RecentRiskAlerts,
 		RecentGuardrails:  ctx.RecentGuardrails,
+		AuxOpinions:       buildAuxOpinionsSnapshot(ctx),
+		EnsembleMeta:      ensembleMeta,
 	}
 }
 
@@ -1007,6 +1108,50 @@ func buildMarketSnapshot(symbol string, data *market.Data, sources []string) pro
 	return snapshot
 }
 
+func buildAuxOpinionsSnapshot(ctx *Context) []promptAuxOpinion {
+	if ctx == nil || len(ctx.AuxOpinions) == 0 {
+		return nil
+	}
+
+	result := make([]promptAuxOpinion, 0, len(ctx.AuxOpinions))
+	for _, aux := range ctx.AuxOpinions {
+		if aux.ModelID == "" {
+			continue
+		}
+		opinion := promptAuxOpinion{
+			ModelID:   aux.ModelID,
+			ModelName: aux.ModelName,
+			Provider:  aux.Provider,
+			Weight:    aux.Weight,
+			Role:      aux.Role,
+			Summary:   truncateString(aux.Summary, 480),
+			Notes:     truncateString(aux.Notes, 200),
+		}
+		if len(aux.Decisions) > 0 {
+			limit := len(aux.Decisions)
+			if limit > 5 {
+				limit = 5
+			}
+			opinion.Votes = make([]promptAuxAction, 0, limit)
+			for i := 0; i < limit; i++ {
+				d := aux.Decisions[i]
+				vote := promptAuxAction{
+					Symbol:       d.Symbol,
+					Action:       d.Action,
+					StrategyHint: d.StrategyHint,
+					Confidence:   d.Confidence,
+					RiskUSD:      d.RiskUSD,
+					Reasoning:    truncateString(d.Reasoning, 200),
+				}
+				opinion.Votes = append(opinion.Votes, vote)
+			}
+		}
+		result = append(result, opinion)
+	}
+
+	return result
+}
+
 func deriveTrendBias(data *market.Data) string {
 	if data.LongerTermContext != nil {
 		lastMACD := lastFloat(data.LongerTermContext.MACDValues)
@@ -1273,6 +1418,24 @@ func hasOpenPosition(positions []PositionInfo, symbol string) bool {
 		}
 	}
 	return false
+}
+
+func truncateString(input string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	trimmed := strings.TrimSpace(input)
+	if trimmed == "" {
+		return ""
+	}
+	runes := []rune(trimmed)
+	if len(runes) <= max {
+		return trimmed
+	}
+	if max <= 1 {
+		return string(runes[:1])
+	}
+	return string(runes[:max-1]) + "…"
 }
 
 func appendIfMissing(items []string, candidate string) []string {
