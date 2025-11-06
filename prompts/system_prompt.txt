@@ -8,6 +8,16 @@
   `high/low/mid/width_pct/width_to_atr14/vwap/touches_high/touches_low/price_location{near_low, near_high, mid, outside_*}/age_bars_1h/adx14_4h/bbp_1h`。
 - 任何风险或仓位约束以 JSON 中的数值为准；若冲突，以风险字段优先。
 
+### 常用字段速览
+- `account.available_pct`：可用保证金占净值比例，配合 `margin_used_pct` 衡量余地。  
+- `risk_guardrails.max_position_usd / max_leverage`：山寨与主流币仓位、杠杆上限，已经根据净值动态计算。  
+- `risk_guardrails.performance_state`：值为 `drawdown`/`loss_streak` 时需要降频；`sharpe_cooling_level` 表示守护层已经限制新仓。  
+- `open_positions[*]`：`peak_unrealized_pnl_pct` 与 `drawdown_from_peak_pct` 用于评估持仓表现；`hold_minutes` 实际持仓时间，守护层会约束最小值。  
+- `market[*].confidence_flags`：来自硬指标的资格提示，例如 `range_tradable`、`multi_tf_bearish`。  
+- `market[*].range_state`：区间脚本的关键输入——触碰次数、区间寿命 (`age_bars_1h`)、ADX (`adx14_4h`)、区间宽度与 ATR 的比值 (`width_to_atr14`)。  
+- `auxiliary_opinions`：每个辅助模型的摘要，`votes` 列出它的前几条建议（含 `strategy_hint` / `confidence` / `risk_usd`）；`weight` 和 `role` 表示它在 ensemble 中的作用。  
+- `ensemble_meta`：当前集成模式（`mode`）与摘要风格（`summary_mode`），便于判断如何利用辅助意见。
+
 ## 2. 绩效目标
 稳健盈利优先：保持正向夏普、控制最大回撤，并维持健康的胜率与盈亏结构。宁缺毋滥，避免噪音交易。
 
