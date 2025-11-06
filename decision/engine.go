@@ -1631,7 +1631,7 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 	switch strategyHint {
 	case "", "auto":
 		strategyHint = ""
-	case "trend", "range":
+	case "trend", "range", "range_developing":
 	case "transitional", "neutral", "balancing":
 		strategyHint = "transitional"
 	case "mean_reversion":
@@ -1665,6 +1665,8 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 			maxLeverage = btcEthLeverage          // BTC和ETH使用配置的杠杆
 			maxPositionValue = accountEquity * 10 // BTC/ETH最多10倍账户净值
 		}
+		isRangeDeveloping := strategyHint == "range_developing"
+		riskBudget := accountEquity * 0.03
 
 		if d.Leverage <= 0 || d.Leverage > maxLeverage {
 			return fmt.Errorf("杠杆必须在1-%d之间（%s，当前配置上限%d倍）: %d", maxLeverage, d.Symbol, maxLeverage, d.Leverage)
@@ -1758,7 +1760,7 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 		d.TakeProfit = takeProfitForRisk
 
 		// range 策略必须提供分批止盈
-		if strategyHint == "range" && len(d.TakeProfitTargets) == 0 {
+		if (strategyHint == "range" || strategyHint == "range_developing") && len(d.TakeProfitTargets) == 0 {
 			return fmt.Errorf("range 策略必须提供 tp_targets 用于分批止盈")
 		}
 
@@ -1775,13 +1777,27 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 
 		// 仓位上限和风险预算收敛
 		tolerance := maxPositionValue * 0.01 // 1%容差
+		if isRangeDeveloping {
+			reducedMaxPosition := maxPositionValue * 0.75
+			reducedTolerance := math.Max(tolerance, reducedMaxPosition*0.01)
+			if d.PositionSizeUSD > reducedMaxPosition+reducedTolerance {
+				return fmt.Errorf("range_developing 策略仓位需≤上限%.2f USDT (75%%)，当前%.2f USDT", reducedMaxPosition, d.PositionSizeUSD)
+			}
+			if d.RiskUSD <= 0 {
+				return fmt.Errorf("range_developing 策略必须提供 risk_usd，并缩减至风险预算60%%以内")
+			}
+			maxRiskAllowed := riskBudget * 0.6
+			if d.RiskUSD > maxRiskAllowed+1e-6 {
+				return fmt.Errorf("range_developing 策略 risk_usd %.2f 超过上限 %.2f (风险预算60%%)", d.RiskUSD, maxRiskAllowed)
+			}
+		}
+
 		if d.PositionSizeUSD > maxPositionValue+tolerance {
 			log.Printf("⚠️  决策仓位超限: %s 请求 %.2f USDT，允许上限 %.2f USDT，自动收敛", d.Symbol, d.PositionSizeUSD, maxPositionValue)
 			d.PositionSizeUSD = maxPositionValue
 		}
 
 		if d.RiskUSD > 0 {
-			riskBudget := accountEquity * 0.03
 			maxRisk := riskBudget * 1.5
 			if d.RiskUSD > maxRisk {
 				if d.RiskUSD > riskBudget*3 {
