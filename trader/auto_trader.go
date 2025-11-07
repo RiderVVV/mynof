@@ -1211,14 +1211,31 @@ func (at *AutoTrader) applyOpenGuard(decision *decision.Decision, marketData *ma
 				log.Printf("  ⚠ 策略hint=range 但当前价格不在区间边界附近，降级为 transitional (price_location=%s)", rs.PriceLocation)
 				strategy = "transitional"
 			} else {
-				touchesOk := rs.TouchesHigh >= 3 && rs.TouchesLow >= 3
+				touchesStrongHigh := rs.TouchesHigh >= 3
+				touchesStrongLow := rs.TouchesLow >= 3
+				touchesSupportHigh := rs.TouchesHigh >= 2
+				touchesSupportLow := rs.TouchesLow >= 2
+
+				touchesBothConfirmed := touchesStrongHigh && touchesStrongLow
+				touchesFlexible := false
+				switch side {
+				case "long":
+					touchesFlexible = touchesStrongLow && touchesSupportHigh
+				case "short":
+					touchesFlexible = touchesStrongHigh && touchesSupportLow
+				default:
+					touchesFlexible = (touchesStrongHigh && touchesSupportLow) || (touchesStrongLow && touchesSupportHigh)
+				}
+
 				ageMature := rs.AgeBars1h >= 12
 				ageDeveloping := rs.AgeBars1h >= 10
 				adxMature := rs.ADX144h <= 0 || rs.ADX144h < 20
 				adxDeveloping := rs.ADX144h <= 0 || rs.ADX144h < 25
+				adxRelaxed := rs.ADX144h <= 0 || rs.ADX144h < 27
 
-				isMatureRange := touchesOk && ageMature && adxMature
-				isDevelopingRange := touchesOk && ageDeveloping && adxDeveloping
+				isMatureRange := touchesBothConfirmed && ageMature && adxMature
+				isDevelopingRange := (touchesBothConfirmed && ageDeveloping && adxDeveloping) ||
+					(touchesFlexible && ageDeveloping && adxRelaxed)
 
 				if !isMatureRange {
 					if !isDevelopingRange {
