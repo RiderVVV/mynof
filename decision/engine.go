@@ -1914,8 +1914,12 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 		isRangeDeveloping := strategyHint == "range_developing"
 		riskBudget := accountEquity * 0.03
 
-		if d.Leverage <= 0 || d.Leverage > maxLeverage {
+		if d.Leverage <= 0 {
 			return fmt.Errorf("杠杆必须在1-%d之间（%s，当前配置上限%d倍）: %d", maxLeverage, d.Symbol, maxLeverage, d.Leverage)
+		}
+		if d.Leverage > maxLeverage {
+			log.Printf("⚠️  杠杆超限: %s 请求 %dx，允许上限 %dx，自动收敛", d.Symbol, d.Leverage, maxLeverage)
+			d.Leverage = maxLeverage
 		}
 		if d.PositionSizeUSD <= 0 {
 			return fmt.Errorf("仓位大小必须大于0: %.2f", d.PositionSizeUSD)
