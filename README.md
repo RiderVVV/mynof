@@ -127,7 +127,7 @@ A Binance-compatible decentralized perpetual futures exchange!
 - **Margin Management**: Total usage ≤90%, AI autonomous decision on usage rate
 - **Risk-Reward Ratio**: Mandatory ≥1:2 (stop-loss:take-profit)
 - **Prevent Position Stacking**: No duplicate opening of same coin/direction
-- **Simple Trailing Guard (NEW)**: After a trade reaches ≥0.5% peak PnL, a 20% drawdown locks profit; leave it on by default or disable via `simple_trailing_guard_enabled`, and control how often it polls Binance via `guard_interval_minutes` (default 1 min).
+- **Simple Trailing Guard (NEW)**: After a trade covers fees (≥0.06% by default) and reaches ≥0.5% peak PnL, a 20% drawdown locks profit; leave it on by default or disable via `simple_trailing_guard_enabled`, tune frequency via `guard_interval_minutes`, and override the fee gate with `simple_trailing_fee_pct`.
 
 ### 🎨 Professional UI
 - **Professional Trading Interface**: Binance-style visual design

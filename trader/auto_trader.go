@@ -78,7 +78,8 @@ type AutoTraderConfig struct {
 	MaxDrawdown     float64       // 最大回撤百分比（提示）
 	StopTradingTime time.Duration // 触发风控后暂停时长
 
-	SimpleTrailingGuardEnabled bool // 是否启用简单回撤守护
+	SimpleTrailingGuardEnabled bool    // 是否启用简单回撤守护
+	SimpleTrailingFeePct       float64 // 回本所需收益阈值（默认0.03%即万五*2）
 }
 
 // EnsembleModelConfig 定义辅助模型的API参数
@@ -114,6 +115,7 @@ const (
 	defaultProfitProtectRetentionRatio = 0.5  // 默认保护时至少保留的利润比例
 	simpleTrailingActivationPct        = 0.5  // 简易守护至少需0.5%峰值收益
 	simpleTrailingDrawdownRatio        = 0.2  // 峰值回撤达到20%时强制锁盈
+	simpleTrailingDefaultFeePct        = 0.03 // 默认万五双向 ≈0.03% 回本线
 )
 
 type positionTargetState struct {
@@ -282,7 +284,7 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 	logDir := fmt.Sprintf("decision_logs/%s", config.ID)
 	decisionLogger := logger.NewDecisionLogger(logDir)
 
-	return &AutoTrader{
+	result := &AutoTrader{
 		id:                    config.ID,
 		name:                  config.Name,
 		aiModel:               config.AIModel,
@@ -306,7 +308,12 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 		ensembleModels:        ensembleModels,
 		positionTargets:       make(map[string]*positionManagementState),
 		lastMarketData:        make(map[string]*market.Data),
-	}, nil
+	}
+	if result.config.SimpleTrailingFeePct <= 0 {
+		result.config.SimpleTrailingFeePct = simpleTrailingDefaultFeePct
+	}
+
+	return result, nil
 }
 
 func initEnsembleModel(parent AutoTraderConfig, cfg EnsembleModelConfig) (ensembleModel, error) {
@@ -1842,7 +1849,8 @@ func (at *AutoTrader) applyProfitProtection(ctx *decision.Context, record *logge
 			continue
 		}
 
-		if at.config.SimpleTrailingGuardEnabled && peakPnL >= simpleTrailingActivationPct {
+		minProfitPct := math.Max(at.config.SimpleTrailingFeePct*2, simpleTrailingDefaultFeePct)
+		if at.config.SimpleTrailingGuardEnabled && peakPnL >= simpleTrailingActivationPct && currentPnL >= minProfitPct {
 			retrace := peakPnL - currentPnL
 			retraceRatio := 0.0
 			if peakPnL != 0 {

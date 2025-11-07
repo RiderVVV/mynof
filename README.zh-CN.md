@@ -127,7 +127,7 @@ NOFX现已支持**三大交易所**：Binance、Hyperliquid和Aster DEX！
 - **保证金管理**: 总使用率≤90%，AI自主决策使用率
 - **风险回报比**: 强制≥1:2（止损:止盈）
 - **防止仓位叠加**: 同币种同方向不允许重复开仓
-- **简易回撤守护（NEW）**：持仓收益达到 ≥0.5% 后只要峰值回撤20%立刻锁盈；默认开启，如需关闭仅需设置 `simple_trailing_guard_enabled`，轮询频率可用 `guard_interval_minutes`（默认1分钟）单独控制。
+- **简易回撤守护（NEW）**：当持仓浮盈超过手续费（默认双程≈0.06%）且峰值≥0.5%时，只要回撤20%立即锁盈；默认开启，可用 `simple_trailing_guard_enabled` 控制开关、`guard_interval_minutes` 控制轮询频率，`simple_trailing_fee_pct` 可自定义回本阈值。
 
 ### 🎨 风格UI
 - **专业交易界面**: 视觉设计

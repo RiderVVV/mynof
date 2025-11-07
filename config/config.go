@@ -71,7 +71,8 @@ type TraderConfig struct {
 	ScanIntervalMinutes  int     `json:"scan_interval_minutes"`
 	GuardIntervalMinutes int     `json:"guard_interval_minutes,omitempty"`
 
-	SimpleTrailingGuardEnabled *bool `json:"simple_trailing_guard_enabled,omitempty"`
+	SimpleTrailingGuardEnabled *bool   `json:"simple_trailing_guard_enabled,omitempty"`
+	SimpleTrailingFeePct       float64 `json:"simple_trailing_fee_pct,omitempty"`
 }
 
 // LeverageConfig 杠杆配置
