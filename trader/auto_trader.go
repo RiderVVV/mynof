@@ -112,6 +112,7 @@ const (
 	defaultProfitProtectLockFloorPct   = 5.0  // 默认回撤保护最低保留利润（%）
 	defaultProfitProtectMinRetracePct  = 3.0  // 默认保护触发的最小回撤幅度（%）
 	defaultProfitProtectRetentionRatio = 0.5  // 默认保护时至少保留的利润比例
+	simpleTrailingActivationPct        = 0.5  // 简易守护至少需0.5%峰值收益
 	simpleTrailingDrawdownRatio        = 0.2  // 峰值回撤达到20%时强制锁盈
 )
 
@@ -1841,7 +1842,7 @@ func (at *AutoTrader) applyProfitProtection(ctx *decision.Context, record *logge
 			continue
 		}
 
-		if at.config.SimpleTrailingGuardEnabled && peakPnL > 0 {
+		if at.config.SimpleTrailingGuardEnabled && peakPnL >= simpleTrailingActivationPct {
 			retrace := peakPnL - currentPnL
 			retraceRatio := 0.0
 			if peakPnL != 0 {
