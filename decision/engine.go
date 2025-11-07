@@ -30,7 +30,9 @@ type PositionInfo struct {
 	UnrealizedPnL        float64 `json:"unrealized_pnl"`
 	UnrealizedPnLPct     float64 `json:"unrealized_pnl_pct"`
 	PeakUnrealizedPnLPct float64 `json:"peak_unrealized_pnl_pct,omitempty"`
+	PeakUnrealizedPnLUSD float64 `json:"peak_unrealized_pnl_usd,omitempty"`
 	DrawdownFromPeakPct  float64 `json:"drawdown_from_peak_pct,omitempty"`
+	DrawdownFromPeakUSD  float64 `json:"drawdown_from_peak_usd,omitempty"`
 	LiquidationPrice     float64 `json:"liquidation_price"`
 	MarginUsed           float64 `json:"margin_used"`
 	UpdateTime           int64   `json:"update_time"` // 持仓更新时间戳（毫秒）
@@ -655,7 +657,9 @@ type promptPosition struct {
 	MarginUsed           float64 `json:"margin_used"`
 	UnrealizedPnLPct     float64 `json:"unrealized_pnl_pct"`
 	PeakUnrealizedPnLPct float64 `json:"peak_unrealized_pnl_pct,omitempty"`
+	PeakUnrealizedPnLUSD float64 `json:"peak_unrealized_pnl_usd,omitempty"`
 	DrawdownFromPeakPct  float64 `json:"drawdown_from_peak_pct,omitempty"`
+	DrawdownFromPeakUSD  float64 `json:"drawdown_from_peak_usd,omitempty"`
 	LiquidationPrice     float64 `json:"liquidation_price"`
 	HoldMinutes          int     `json:"hold_minutes"`
 }
@@ -1037,7 +1041,9 @@ func buildOpenPositionsSnapshot(ctx *Context) []promptPosition {
 			MarginUsed:           pos.MarginUsed,
 			UnrealizedPnLPct:     pos.UnrealizedPnLPct,
 			PeakUnrealizedPnLPct: pos.PeakUnrealizedPnLPct,
+			PeakUnrealizedPnLUSD: pos.PeakUnrealizedPnLUSD,
 			DrawdownFromPeakPct:  pos.DrawdownFromPeakPct,
+			DrawdownFromPeakUSD:  pos.DrawdownFromPeakUSD,
 			LiquidationPrice:     pos.LiquidationPrice,
 			HoldMinutes:          deriveHoldMinutes(pos.UpdateTime),
 		})

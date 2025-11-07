@@ -70,12 +70,7 @@ type TraderConfig struct {
 	InitialBalance      float64 `json:"initial_balance"`
 	ScanIntervalMinutes int     `json:"scan_interval_minutes"`
 
-	EarlyProfitProtectEnabled bool    `json:"early_profit_protect_enabled,omitempty"`
-	EarlyProfitActivationPct  float64 `json:"early_profit_activation_pct,omitempty"`
-	EarlyProfitRetraceRatio   float64 `json:"early_profit_retrace_ratio,omitempty"`
-	EarlyProfitMinRetracePct  float64 `json:"early_profit_min_retrace_pct,omitempty"`
-	EarlyProfitRetentionRatio float64 `json:"early_profit_retention_ratio,omitempty"`
-	EarlyProfitMaxHoldMinutes int     `json:"early_profit_max_hold_minutes,omitempty"`
+	SimpleTrailingGuardEnabled *bool `json:"simple_trailing_guard_enabled,omitempty"`
 }
 
 // LeverageConfig 杠杆配置
@@ -210,27 +205,6 @@ func (c *Config) Validate() error {
 		}
 		if trader.ScanIntervalMinutes <= 0 {
 			trader.ScanIntervalMinutes = 3 // 默认3分钟
-		}
-		if trader.EarlyProfitActivationPct < 0 {
-			return fmt.Errorf("trader[%d]: early_profit_activation_pct不能为负数", i)
-		}
-		if trader.EarlyProfitMinRetracePct < 0 {
-			return fmt.Errorf("trader[%d]: early_profit_min_retrace_pct不能为负数", i)
-		}
-		if trader.EarlyProfitRetraceRatio < 0 {
-			return fmt.Errorf("trader[%d]: early_profit_retrace_ratio不能小于0", i)
-		}
-		if trader.EarlyProfitRetraceRatio >= 1 {
-			return fmt.Errorf("trader[%d]: early_profit_retrace_ratio必须小于1", i)
-		}
-		if trader.EarlyProfitRetentionRatio < 0 {
-			return fmt.Errorf("trader[%d]: early_profit_retention_ratio不能小于0", i)
-		}
-		if trader.EarlyProfitRetentionRatio >= 1 {
-			return fmt.Errorf("trader[%d]: early_profit_retention_ratio必须小于1", i)
-		}
-		if trader.EarlyProfitMaxHoldMinutes < 0 {
-			return fmt.Errorf("trader[%d]: early_profit_max_hold_minutes不能小于0", i)
 		}
 
 		if len(trader.Ensemble.Models) > 0 {

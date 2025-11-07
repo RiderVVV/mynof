@@ -33,40 +33,40 @@ func (tm *TraderManager) AddTrader(cfg config.TraderConfig, coinPoolURL string, 
 
 	// 构建AutoTraderConfig
 	traderConfig := trader.AutoTraderConfig{
-		ID:                        cfg.ID,
-		Name:                      cfg.Name,
-		AIModel:                   cfg.AIModel,
-		Exchange:                  cfg.Exchange,
-		BinanceAPIKey:             cfg.BinanceAPIKey,
-		BinanceSecretKey:          cfg.BinanceSecretKey,
-		HyperliquidPrivateKey:     cfg.HyperliquidPrivateKey,
-		HyperliquidWalletAddr:     cfg.HyperliquidWalletAddr,
-		HyperliquidTestnet:        cfg.HyperliquidTestnet,
-		AsterUser:                 cfg.AsterUser,
-		AsterSigner:               cfg.AsterSigner,
-		AsterPrivateKey:           cfg.AsterPrivateKey,
-		CoinPoolAPIURL:            coinPoolURL,
-		UseQwen:                   cfg.AIModel == "qwen",
-		DeepSeekKey:               cfg.DeepSeekKey,
-		QwenKey:                   cfg.QwenKey,
-		CustomAPIURL:              cfg.CustomAPIURL,
-		CustomAPIKey:              cfg.CustomAPIKey,
-		CustomModelName:           cfg.CustomModelName,
-		CustomAPIHTTPReferer:      cfg.CustomAPIHTTPReferer,
-		CustomAPIXTitle:           cfg.CustomAPIXTitle,
-		ScanInterval:              cfg.GetScanInterval(),
-		InitialBalance:            cfg.InitialBalance,
-		BTCETHLeverage:            leverage.BTCETHLeverage,  // 使用配置的杠杆倍数
-		AltcoinLeverage:           leverage.AltcoinLeverage, // 使用配置的杠杆倍数
-		MaxDailyLoss:              maxDailyLoss,
-		MaxDrawdown:               maxDrawdown,
-		StopTradingTime:           time.Duration(stopTradingMinutes) * time.Minute,
-		EarlyProfitProtectEnabled: cfg.EarlyProfitProtectEnabled,
-		EarlyProfitActivationPct:  cfg.EarlyProfitActivationPct,
-		EarlyProfitRetraceRatio:   cfg.EarlyProfitRetraceRatio,
-		EarlyProfitMinRetracePct:  cfg.EarlyProfitMinRetracePct,
-		EarlyProfitRetentionRatio: cfg.EarlyProfitRetentionRatio,
-		EarlyProfitMaxHoldMinutes: cfg.EarlyProfitMaxHoldMinutes,
+		ID:                    cfg.ID,
+		Name:                  cfg.Name,
+		AIModel:               cfg.AIModel,
+		Exchange:              cfg.Exchange,
+		BinanceAPIKey:         cfg.BinanceAPIKey,
+		BinanceSecretKey:      cfg.BinanceSecretKey,
+		HyperliquidPrivateKey: cfg.HyperliquidPrivateKey,
+		HyperliquidWalletAddr: cfg.HyperliquidWalletAddr,
+		HyperliquidTestnet:    cfg.HyperliquidTestnet,
+		AsterUser:             cfg.AsterUser,
+		AsterSigner:           cfg.AsterSigner,
+		AsterPrivateKey:       cfg.AsterPrivateKey,
+		CoinPoolAPIURL:        coinPoolURL,
+		UseQwen:               cfg.AIModel == "qwen",
+		DeepSeekKey:           cfg.DeepSeekKey,
+		QwenKey:               cfg.QwenKey,
+		CustomAPIURL:          cfg.CustomAPIURL,
+		CustomAPIKey:          cfg.CustomAPIKey,
+		CustomModelName:       cfg.CustomModelName,
+		CustomAPIHTTPReferer:  cfg.CustomAPIHTTPReferer,
+		CustomAPIXTitle:       cfg.CustomAPIXTitle,
+		ScanInterval:          cfg.GetScanInterval(),
+		InitialBalance:        cfg.InitialBalance,
+		BTCETHLeverage:        leverage.BTCETHLeverage,  // 使用配置的杠杆倍数
+		AltcoinLeverage:       leverage.AltcoinLeverage, // 使用配置的杠杆倍数
+		MaxDailyLoss:          maxDailyLoss,
+		MaxDrawdown:           maxDrawdown,
+		StopTradingTime:       time.Duration(stopTradingMinutes) * time.Minute,
+	}
+
+	if cfg.SimpleTrailingGuardEnabled != nil {
+		traderConfig.SimpleTrailingGuardEnabled = *cfg.SimpleTrailingGuardEnabled
+	} else {
+		traderConfig.SimpleTrailingGuardEnabled = true
 	}
 
 	if len(cfg.Ensemble.Models) > 0 {

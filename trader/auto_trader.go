@@ -77,13 +77,7 @@ type AutoTraderConfig struct {
 	MaxDrawdown     float64       // 最大回撤百分比（提示）
 	StopTradingTime time.Duration // 触发风控后暂停时长
 
-	// 盈利保护增强
-	EarlyProfitProtectEnabled bool    // 是否启用快速止盈保护
-	EarlyProfitActivationPct  float64 // 峰值收益达到多少百分比时开始监控
-	EarlyProfitRetraceRatio   float64 // 回撤占峰值收益的比例阈值（0-1）
-	EarlyProfitMinRetracePct  float64 // 回撤的最小绝对值阈值（百分比）
-	EarlyProfitRetentionRatio float64 // 至少保留的峰值利润比例（0-1），低于该水平触发止盈
-	EarlyProfitMaxHoldMinutes int     // 仅对持仓时间少于该分钟数的仓位启用（<=0 表示不限制）
+	SimpleTrailingGuardEnabled bool // 是否启用简单回撤守护
 }
 
 // EnsembleModelConfig 定义辅助模型的API参数
@@ -117,12 +111,7 @@ const (
 	defaultProfitProtectLockFloorPct   = 5.0  // 默认回撤保护最低保留利润（%）
 	defaultProfitProtectMinRetracePct  = 3.0  // 默认保护触发的最小回撤幅度（%）
 	defaultProfitProtectRetentionRatio = 0.5  // 默认保护时至少保留的利润比例
-
-	defaultEarlyProtectActivationPct  = 1.0  // 峰值≥1%开始跟踪
-	defaultEarlyProtectRetraceRatio   = 0.4  // 回撤达到峰值的40%触发
-	defaultEarlyProtectMinRetracePct  = 0.8  // 或者绝对回撤≥0.8%触发
-	defaultEarlyProtectRetentionRatio = 0.55 // 至少锁住55%的峰值利润
-	defaultEarlyProtectMaxHoldMinutes = 9    // 仅对9分钟内的新仓应用快速止盈
+	simpleTrailingDrawdownRatio        = 0.2  // 峰值回撤达到20%时强制锁盈
 )
 
 type positionTargetState struct {
@@ -158,6 +147,7 @@ type AutoTrader struct {
 	callCount             int              // AI调用次数
 	positionFirstSeenTime map[string]int64 // 持仓首次出现时间 (symbol_side -> timestamp毫秒)
 	positionPnLHigh       map[string]float64
+	positionPnLHighUSD    map[string]float64
 	positionMinHoldUntil  map[string]time.Time
 	positionGuardStrategy map[string]string
 	ensembleMode          string
@@ -258,27 +248,6 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 		return nil, fmt.Errorf("初始金额必须大于0，请在配置中设置InitialBalance")
 	}
 
-	if config.EarlyProfitProtectEnabled {
-		if config.EarlyProfitActivationPct <= 0 {
-			config.EarlyProfitActivationPct = defaultEarlyProtectActivationPct
-		}
-		if config.EarlyProfitRetraceRatio <= 0 || config.EarlyProfitRetraceRatio >= 1 {
-			config.EarlyProfitRetraceRatio = defaultEarlyProtectRetraceRatio
-		}
-		if config.EarlyProfitMinRetracePct <= 0 {
-			config.EarlyProfitMinRetracePct = defaultEarlyProtectMinRetracePct
-		}
-		if config.EarlyProfitRetentionRatio <= 0 || config.EarlyProfitRetentionRatio >= 1 {
-			config.EarlyProfitRetentionRatio = defaultEarlyProtectRetentionRatio
-		} else {
-			config.EarlyProfitRetentionRatio = clampFloat(0.3, 0.9, config.EarlyProfitRetentionRatio)
-		}
-		config.EarlyProfitRetraceRatio = clampFloat(0.2, 0.9, config.EarlyProfitRetraceRatio)
-		if config.EarlyProfitMaxHoldMinutes <= 0 {
-			config.EarlyProfitMaxHoldMinutes = defaultEarlyProtectMaxHoldMinutes
-		}
-	}
-
 	ensembleMode := strings.TrimSpace(config.EnsembleMode)
 	if ensembleMode == "" {
 		ensembleMode = "majority"
@@ -323,6 +292,7 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 		isRunning:             false,
 		positionFirstSeenTime: make(map[string]int64),
 		positionPnLHigh:       make(map[string]float64),
+		positionPnLHighUSD:    make(map[string]float64),
 		positionMinHoldUntil:  make(map[string]time.Time),
 		positionGuardStrategy: make(map[string]string),
 		ensembleMode:          ensembleMode,
@@ -951,6 +921,18 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 			at.positionPnLHigh[posKey] = pnlPct
 		}
 
+		peakPnLUSD := unrealizedPnl
+		if maxPnLUSD, exists := at.positionPnLHighUSD[posKey]; exists {
+			if unrealizedPnl > maxPnLUSD {
+				peakPnLUSD = unrealizedPnl
+				at.positionPnLHighUSD[posKey] = unrealizedPnl
+			} else {
+				peakPnLUSD = maxPnLUSD
+			}
+		} else {
+			at.positionPnLHighUSD[posKey] = unrealizedPnl
+		}
+
 		drawdownFromPeakPoints := peakPnL - pnlPct
 		if drawdownFromPeakPoints < 0 {
 			drawdownFromPeakPoints = 0
@@ -961,6 +943,10 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 			if drawdownFromPeakRatio < 0 {
 				drawdownFromPeakRatio = 0
 			}
+		}
+		drawdownFromPeakUSD := peakPnLUSD - unrealizedPnl
+		if drawdownFromPeakUSD < 0 {
+			drawdownFromPeakUSD = 0
 		}
 
 		positionInfos = append(positionInfos, decision.PositionInfo{
@@ -973,7 +959,9 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 			UnrealizedPnL:        unrealizedPnl,
 			UnrealizedPnLPct:     pnlPct,
 			PeakUnrealizedPnLPct: peakPnL,
+			PeakUnrealizedPnLUSD: peakPnLUSD,
 			DrawdownFromPeakPct:  drawdownFromPeakRatio,
+			DrawdownFromPeakUSD:  drawdownFromPeakUSD,
 			LiquidationPrice:     liquidationPrice,
 			MarginUsed:           marginUsed,
 			UpdateTime:           updateTime,
@@ -989,6 +977,11 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 	for key := range at.positionPnLHigh {
 		if !currentPositionKeys[key] {
 			delete(at.positionPnLHigh, key)
+		}
+	}
+	for key := range at.positionPnLHighUSD {
+		if !currentPositionKeys[key] {
+			delete(at.positionPnLHighUSD, key)
 		}
 	}
 	for key := range at.positionMinHoldUntil {
@@ -1756,55 +1749,8 @@ func (at *AutoTrader) clearPositionState(posKey string) {
 	delete(at.positionMinHoldUntil, posKey)
 	delete(at.positionGuardStrategy, posKey)
 	delete(at.positionPnLHigh, posKey)
+	delete(at.positionPnLHighUSD, posKey)
 	delete(at.positionFirstSeenTime, posKey)
-}
-
-func (at *AutoTrader) shouldTriggerEarlyProfitProtect(pos decision.PositionInfo, peakPnL, currentPnL float64) (bool, float64, float64, float64, float64) {
-	if !at.config.EarlyProfitProtectEnabled {
-		return false, 0, 0, 0, 0
-	}
-	if peakPnL <= 0 {
-		return false, 0, 0, 0, 0
-	}
-	if peakPnL < at.config.EarlyProfitActivationPct {
-		return false, 0, 0, 0, 0
-	}
-
-	ageMinutes := 0.0
-	if pos.UpdateTime > 0 {
-		updateTime := time.Unix(0, pos.UpdateTime*int64(time.Millisecond))
-		ageMinutes = time.Since(updateTime).Minutes()
-	}
-	if at.config.EarlyProfitMaxHoldMinutes > 0 && ageMinutes > float64(at.config.EarlyProfitMaxHoldMinutes) {
-		return false, 0, 0, 0, 0
-	}
-
-	retrace := peakPnL - currentPnL
-	if retrace <= 0 {
-		return false, 0, 0, 0, 0
-	}
-
-	retraceRatio := 0.0
-	if peakPnL != 0 {
-		retraceRatio = retrace / peakPnL
-	}
-
-	meetsRetrace := retrace >= at.config.EarlyProfitMinRetracePct
-	meetsRatio := retraceRatio >= at.config.EarlyProfitRetraceRatio
-	if !meetsRetrace && !meetsRatio {
-		return false, 0, 0, 0, 0
-	}
-
-	lockLevel := peakPnL * at.config.EarlyProfitRetentionRatio
-	if lockLevel < 0 {
-		lockLevel = 0
-	}
-
-	if currentPnL > lockLevel {
-		return false, 0, 0, 0, 0
-	}
-
-	return true, lockLevel, retrace, retraceRatio, ageMinutes
 }
 
 // applyProfitProtection 针对高收益回撤执行强制止盈保护
@@ -1818,6 +1764,7 @@ func (at *AutoTrader) applyProfitProtection(ctx *decision.Context, record *logge
 	for _, pos := range ctx.Positions {
 		posKey := pos.Symbol + "_" + pos.Side
 		currentPnL := pos.UnrealizedPnLPct
+		currentPnLUSD := pos.UnrealizedPnL
 
 		thresholds, _ := at.computeProfitProtectionThresholds(pos, marketCache)
 
@@ -1827,6 +1774,13 @@ func (at *AutoTrader) applyProfitProtection(ctx *decision.Context, record *logge
 			peakPnL = currentPnL
 		}
 
+		peakPnLUSD, trackedUSD := at.positionPnLHighUSD[posKey]
+		if !trackedUSD {
+			at.positionPnLHighUSD[posKey] = currentPnLUSD
+			peakPnLUSD = currentPnLUSD
+		}
+
+		newPeak := false
 		if currentPnL > peakPnL {
 			at.positionPnLHigh[posKey] = currentPnL
 			if peakPnL < thresholds.activationPct && currentPnL >= thresholds.activationPct {
@@ -1835,74 +1789,88 @@ func (at *AutoTrader) applyProfitProtection(ctx *decision.Context, record *logge
 				log.Println(msg)
 				record.ExecutionLog = append(record.ExecutionLog, msg)
 			}
+			peakPnL = currentPnL
+			newPeak = true
+		}
+		if currentPnLUSD > peakPnLUSD {
+			at.positionPnLHighUSD[posKey] = currentPnLUSD
+			peakPnLUSD = currentPnLUSD
+			newPeak = true
+		}
+		if newPeak {
 			continue
 		}
 
-		if triggered, lockLevel, retrace, retraceRatio, ageMinutes := at.shouldTriggerEarlyProfitProtect(pos, peakPnL, currentPnL); triggered {
-			logMsg := fmt.Sprintf("⚡️ 提前止盈触发: %s %s 峰值%.2f%% → 当前%.2f%% (回撤%.2f%% | 回撤比例 %.0f%% | 锁定线 %.2f%% | 持仓 %.1f 分钟)",
-				pos.Symbol,
-				pos.Side,
-				peakPnL,
-				currentPnL,
-				retrace,
-				retraceRatio*100,
-				lockLevel,
-				ageMinutes)
-			log.Println(logMsg)
-			record.ExecutionLog = append(record.ExecutionLog, logMsg)
-
-			if err := at.trader.CancelAllOrders(pos.Symbol); err != nil {
-				log.Printf("  ⚠ 取消 %s 未完成委托失败: %v", pos.Symbol, err)
+		if at.config.SimpleTrailingGuardEnabled && peakPnL > 0 {
+			retrace := peakPnL - currentPnL
+			retraceRatio := 0.0
+			if peakPnL != 0 {
+				retraceRatio = retrace / peakPnL
 			}
+			if retraceRatio >= simpleTrailingDrawdownRatio {
+				msg := fmt.Sprintf("⚡️ 简易回撤守护触发: %s %s 峰值%.2f%% → 当前%.2f%% (回撤比例 %.0f%% ≥ %.0f%%)",
+					pos.Symbol,
+					pos.Side,
+					peakPnL,
+					currentPnL,
+					retraceRatio*100,
+					simpleTrailingDrawdownRatio*100)
+				log.Println(msg)
+				record.ExecutionLog = append(record.ExecutionLog, msg)
 
-			var (
-				order  map[string]interface{}
-				err    error
-				action string
-			)
+				if err := at.trader.CancelAllOrders(pos.Symbol); err != nil {
+					log.Printf("  ⚠ 取消 %s 未完成委托失败: %v", pos.Symbol, err)
+				}
 
-			switch pos.Side {
-			case "long":
-				order, err = at.trader.CloseLong(pos.Symbol, 0)
-				action = "close_long"
-			case "short":
-				order, err = at.trader.CloseShort(pos.Symbol, 0)
-				action = "close_short"
-			default:
-				log.Printf("  ⚠ 未知持仓方向 %s，跳过提前止盈执行", pos.Side)
+				var (
+					order  map[string]interface{}
+					err    error
+					action string
+				)
+
+				switch pos.Side {
+				case "long":
+					order, err = at.trader.CloseLong(pos.Symbol, 0)
+					action = "close_long"
+				case "short":
+					order, err = at.trader.CloseShort(pos.Symbol, 0)
+					action = "close_short"
+				default:
+					log.Printf("  ⚠ 未知持仓方向 %s，跳过简易守护执行", pos.Side)
+					continue
+				}
+
+				actionRecord := logger.DecisionAction{
+					Action:    action,
+					Symbol:    pos.Symbol,
+					Quantity:  pos.Quantity,
+					Leverage:  pos.Leverage,
+					Price:     pos.MarkPrice,
+					Timestamp: time.Now(),
+				}
+
+				if err != nil {
+					failedClosures++
+					errMsg := fmt.Sprintf("简易回撤守护平仓失败 %s %s: %v", pos.Symbol, pos.Side, err)
+					log.Printf("❌ %s", errMsg)
+					actionRecord.Success = false
+					actionRecord.Error = err.Error()
+					errorMessages = append(errorMessages, errMsg)
+				} else {
+					forcedClosures++
+					if orderID, ok := extractOrderID(order); ok {
+						actionRecord.OrderID = orderID
+					}
+					actionRecord.Success = true
+					record.ExecutionLog = append(record.ExecutionLog,
+						fmt.Sprintf("✓ 简易回撤守护平仓: %s %s 锁定利润%.2f%% (峰值%.2f%%)",
+							pos.Symbol, pos.Side, math.Max(currentPnL, 0), peakPnL))
+					at.clearPositionState(posKey)
+				}
+
+				record.Decisions = append(record.Decisions, actionRecord)
 				continue
 			}
-
-			actionRecord := logger.DecisionAction{
-				Action:    action,
-				Symbol:    pos.Symbol,
-				Quantity:  pos.Quantity,
-				Leverage:  pos.Leverage,
-				Price:     pos.MarkPrice,
-				Timestamp: time.Now(),
-			}
-
-			if err != nil {
-				failedClosures++
-				errMsg := fmt.Sprintf("提前止盈平仓失败 %s %s: %v", pos.Symbol, pos.Side, err)
-				log.Printf("❌ %s", errMsg)
-				actionRecord.Success = false
-				actionRecord.Error = err.Error()
-				errorMessages = append(errorMessages, errMsg)
-			} else {
-				forcedClosures++
-				if orderID, ok := extractOrderID(order); ok {
-					actionRecord.OrderID = orderID
-				}
-				actionRecord.Success = true
-				record.ExecutionLog = append(record.ExecutionLog,
-					fmt.Sprintf("✓ 提前止盈平仓成功: %s %s 保留利润%.2f%% (锁定线%.2f%%)",
-						pos.Symbol, pos.Side, math.Max(currentPnL, 0), lockLevel))
-				at.clearPositionState(posKey)
-			}
-
-			record.Decisions = append(record.Decisions, actionRecord)
-			continue
 		}
 
 		if peakPnL < thresholds.activationPct {
