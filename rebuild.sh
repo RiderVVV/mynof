@@ -8,6 +8,10 @@ echo "========================================"
 echo "开始清理旧的容器和镜像..."
 echo "========================================"
 
+# 清空 decision_logs 目录
+echo "Cleaning decision_logs directory..."
+rm -rf decision_logs/*
+
 # 停止并删除容器
 echo "停止容器..."
 docker-compose down || true
