@@ -63,7 +63,8 @@ type AutoTraderConfig struct {
 	EnsembleModels      []EnsembleModelConfig
 
 	// 扫描配置
-	ScanInterval time.Duration // 扫描间隔（建议3分钟）
+	ScanInterval  time.Duration // 扫描间隔（建议3分钟）
+	GuardInterval time.Duration // 守护巡检间隔（默认1分钟）
 
 	// 账户配置
 	InitialBalance float64 // 初始金额（用于计算盈亏，需手动设置）
@@ -248,6 +249,10 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 		return nil, fmt.Errorf("初始金额必须大于0，请在配置中设置InitialBalance")
 	}
 
+	if config.GuardInterval <= 0 {
+		config.GuardInterval = time.Minute
+	}
+
 	ensembleMode := strings.TrimSpace(config.EnsembleMode)
 	if ensembleMode == "" {
 		ensembleMode = "majority"
@@ -386,20 +391,30 @@ func (at *AutoTrader) Run() error {
 	log.Println("🚀 AI驱动自动交易系统启动")
 	log.Printf("💰 初始余额: %.2f USDT", at.initialBalance)
 	log.Printf("⚙️  扫描间隔: %v", at.config.ScanInterval)
+	log.Printf("🛡 守护巡检: %v", at.config.GuardInterval)
 	log.Println("🤖 AI将全权决定杠杆、仓位大小、止损止盈等参数")
-	log.Println("🛡 盈利回撤保护启用: 阈值将随杠杆与4H ATR动态调整（默认参考 ≥12% 盈利、回撤 ≥3%、锁定 ≥50% 利润）。")
+	log.Println("🛡 盈利回撤保护启用：动态阈值 + 峰值回撤20% 简易守护双层锁盈。")
 
-	ticker := time.NewTicker(at.config.ScanInterval)
-	defer ticker.Stop()
+	decisionTicker := time.NewTicker(at.config.ScanInterval)
+	defer decisionTicker.Stop()
+	guardTicker := time.NewTicker(at.config.GuardInterval)
+	defer guardTicker.Stop()
 
-	// 首次立即执行
+	// 先跑一次守护巡检，再执行完整AI周期
+	if err := at.runGuardCycle(); err != nil {
+		log.Printf("⚠️ 守护巡检失败: %v", err)
+	}
 	if err := at.runCycle(); err != nil {
 		log.Printf("❌ 执行失败: %v", err)
 	}
 
 	for at.isRunning {
 		select {
-		case <-ticker.C:
+		case <-guardTicker.C:
+			if err := at.runGuardCycle(); err != nil {
+				log.Printf("⚠️ 守护巡检失败: %v", err)
+			}
+		case <-decisionTicker.C:
 			if err := at.runCycle(); err != nil {
 				log.Printf("❌ 执行失败: %v", err)
 			}
@@ -413,6 +428,31 @@ func (at *AutoTrader) Run() error {
 func (at *AutoTrader) Stop() {
 	at.isRunning = false
 	log.Println("⏹ 自动交易系统停止")
+}
+
+// runGuardCycle 只执行守护巡检（不调用AI）
+func (at *AutoTrader) runGuardCycle() error {
+	ctx, err := at.buildTradingContext()
+	if err != nil {
+		return fmt.Errorf("守护巡检构建交易上下文失败: %w", err)
+	}
+
+	record := &logger.DecisionRecord{
+		ExecutionLog: []string{},
+		Success:      true,
+		InputPrompt:  "guard_cycle",
+	}
+	at.populateRecordFromContext(record, ctx)
+
+	if handled, err := at.applyProfitProtection(ctx, record); err != nil {
+		return fmt.Errorf("守护巡检执行盈利保护失败: %w", err)
+	} else if handled {
+		if logErr := at.decisionLogger.LogDecision(record); logErr != nil {
+			log.Printf("⚠ 保存守护巡检记录失败: %v", logErr)
+		}
+	}
+
+	return nil
 }
 
 // runCycle 运行一个交易周期（使用AI全权决策）

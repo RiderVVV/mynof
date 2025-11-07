@@ -67,8 +67,9 @@ type TraderConfig struct {
 
 	Ensemble EnsembleConfig `json:"ensemble,omitempty"`
 
-	InitialBalance      float64 `json:"initial_balance"`
-	ScanIntervalMinutes int     `json:"scan_interval_minutes"`
+	InitialBalance       float64 `json:"initial_balance"`
+	ScanIntervalMinutes  int     `json:"scan_interval_minutes"`
+	GuardIntervalMinutes int     `json:"guard_interval_minutes,omitempty"`
 
 	SimpleTrailingGuardEnabled *bool `json:"simple_trailing_guard_enabled,omitempty"`
 }
@@ -276,4 +277,12 @@ func (c *Config) Validate() error {
 // GetScanInterval 获取扫描间隔
 func (tc *TraderConfig) GetScanInterval() time.Duration {
 	return time.Duration(tc.ScanIntervalMinutes) * time.Minute
+}
+
+// GetGuardInterval 获取守护巡检间隔（默认1分钟）
+func (tc *TraderConfig) GetGuardInterval() time.Duration {
+	if tc.GuardIntervalMinutes <= 0 {
+		return time.Minute
+	}
+	return time.Duration(tc.GuardIntervalMinutes) * time.Minute
 }

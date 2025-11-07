@@ -55,6 +55,7 @@ func (tm *TraderManager) AddTrader(cfg config.TraderConfig, coinPoolURL string, 
 		CustomAPIHTTPReferer:  cfg.CustomAPIHTTPReferer,
 		CustomAPIXTitle:       cfg.CustomAPIXTitle,
 		ScanInterval:          cfg.GetScanInterval(),
+		GuardInterval:         cfg.GetGuardInterval(),
 		InitialBalance:        cfg.InitialBalance,
 		BTCETHLeverage:        leverage.BTCETHLeverage,  // 使用配置的杠杆倍数
 		AltcoinLeverage:       leverage.AltcoinLeverage, // 使用配置的杠杆倍数

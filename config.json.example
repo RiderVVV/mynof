@@ -12,6 +12,7 @@
       "deepseek_key": "your_deepseek_api_key",
       "initial_balance": 1000,
       "scan_interval_minutes": 3,
+      "guard_interval_minutes": 1,
       "simple_trailing_guard_enabled": true
     },
     {
