@@ -16,6 +16,9 @@ import (
 	"time"
 )
 
+// MaxMarginUsagePct 定义总保证金使用率的硬上限（百分比）
+const MaxMarginUsagePct = 90.0
+
 // PositionInfo 持仓信息
 type PositionInfo struct {
 	Symbol               string  `json:"symbol"`
@@ -74,10 +77,100 @@ type Context struct {
 	BTCETHLeverage   int                      `json:"-"` // BTC/ETH杠杆倍数（从配置读取）
 	AltcoinLeverage  int                      `json:"-"` // 山寨币杠杆倍数（从配置读取）
 	AuxOpinions      []AuxOpinion             `json:"-"` // 辅助模型意见
+	AuxConsensus     *AuxConsensus            `json:"-"` // 辅助模型共识
 	EnsembleMode     string                   `json:"-"`
 	EnsembleSummary  string                   `json:"-"`
 	RecentRiskAlerts []RiskFlag               `json:"-"`
 	RecentGuardrails []MarketGuardrailWarning `json:"-"`
+}
+
+// AuxConsensus 描述辅助模型之间的总体意见
+type AuxConsensus struct {
+	TotalModels int
+	OpenCount   int
+	WaitCount   int
+	Majority    string // open / wait / mixed
+
+	OpenModels []string
+	WaitModels []string
+
+	SymbolVotes map[string]*AuxSymbolConsensus
+}
+
+// AuxSymbolConsensus 记录每个币种在不同方向上的支持模型
+type AuxSymbolConsensus struct {
+	LongModels  []string
+	ShortModels []string
+}
+
+// ComputeAuxConsensus 统计辅助模型意见的整体状况
+func ComputeAuxConsensus(opinions []AuxOpinion) *AuxConsensus {
+	if len(opinions) == 0 {
+		return nil
+	}
+
+	result := &AuxConsensus{
+		TotalModels: len(opinions),
+		SymbolVotes: make(map[string]*AuxSymbolConsensus),
+	}
+
+	for _, opinion := range opinions {
+		modelName := strings.TrimSpace(opinion.ModelName)
+		if modelName == "" {
+			modelName = strings.TrimSpace(opinion.ModelID)
+		}
+		if modelName == "" {
+			modelName = "aux_model"
+		}
+
+		hasOpenAction := false
+		for _, vote := range opinion.Decisions {
+			if !isDecisionOpenAction(vote.Action) || vote.Symbol == "" {
+				continue
+			}
+			hasOpenAction = true
+			symbol := strings.ToUpper(strings.TrimSpace(vote.Symbol))
+			if symbol == "" {
+				continue
+			}
+
+			slot, exists := result.SymbolVotes[symbol]
+			if !exists {
+				slot = &AuxSymbolConsensus{}
+				result.SymbolVotes[symbol] = slot
+			}
+
+			switch vote.Action {
+			case "open_long":
+				slot.LongModels = appendIfMissing(slot.LongModels, modelName)
+			case "open_short":
+				slot.ShortModels = appendIfMissing(slot.ShortModels, modelName)
+			}
+		}
+
+		if hasOpenAction {
+			result.OpenCount++
+			result.OpenModels = append(result.OpenModels, modelName)
+		} else {
+			result.WaitCount++
+			result.WaitModels = append(result.WaitModels, modelName)
+		}
+	}
+
+	switch {
+	case result.WaitCount*2 > result.TotalModels:
+		result.Majority = "wait"
+	case result.OpenCount*2 > result.TotalModels:
+		result.Majority = "open"
+	default:
+		result.Majority = "mixed"
+	}
+
+	if len(result.SymbolVotes) == 0 {
+		result.SymbolVotes = nil
+	}
+
+	return result
 }
 
 // Decision AI的交易决策
@@ -389,7 +482,7 @@ func buildDefaultSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeve
 	sb.WriteString("2. **最多持仓**: 3个币种（质量>数量）\n")
 	sb.WriteString(fmt.Sprintf("3. **单币仓位**: 山寨%.0f-%.0f U(%dx杠杆) | BTC/ETH %.0f-%.0f U(%dx杠杆)\n",
 		accountEquity*0.8, accountEquity*1.5, altcoinLeverage, accountEquity*5, accountEquity*10, btcEthLeverage))
-	sb.WriteString("4. **保证金**: 总使用率 ≤ 50%\n\n")
+	sb.WriteString(fmt.Sprintf("4. **保证金**: 总使用率 ≤ %.0f%%\n\n", MaxMarginUsagePct))
 
 	// === 做空激励 ===
 	sb.WriteString("# 📉 做多做空平衡\n\n")
@@ -686,6 +779,21 @@ type promptAuxAction struct {
 	Reasoning    string  `json:"reasoning,omitempty"`
 }
 
+type promptAuxConsensus struct {
+	TotalModels int                            `json:"models_total"`
+	ModelsOpen  int                            `json:"models_open"`
+	ModelsWait  int                            `json:"models_wait"`
+	Majority    string                         `json:"majority"`
+	OpenModels  []string                       `json:"open_models,omitempty"`
+	WaitModels  []string                       `json:"wait_models,omitempty"`
+	SymbolVotes map[string]promptSymbolSupport `json:"symbol_votes,omitempty"`
+}
+
+type promptSymbolSupport struct {
+	Long  []string `json:"long,omitempty"`
+	Short []string `json:"short,omitempty"`
+}
+
 type promptEnsembleMeta struct {
 	Mode        string `json:"mode"`
 	SummaryMode string `json:"summary_mode,omitempty"`
@@ -702,6 +810,7 @@ type promptSnapshot struct {
 	RecentRiskAlerts  []RiskFlag               `json:"recent_risk_alerts,omitempty"`
 	RecentGuardrails  []MarketGuardrailWarning `json:"recent_guardrails,omitempty"`
 	AuxOpinions       []promptAuxOpinion       `json:"auxiliary_opinions,omitempty"`
+	AuxConsensus      *promptAuxConsensus      `json:"auxiliary_consensus,omitempty"`
 	EnsembleMeta      *promptEnsembleMeta      `json:"ensemble_meta,omitempty"`
 }
 
@@ -712,7 +821,7 @@ func buildPromptSnapshot(ctx *Context) promptSnapshot {
 	}
 
 	riskBudget := ctx.Account.TotalEquity * 0.03
-	marginHeadroom := math.Max(0, 90-ctx.Account.MarginUsedPct)
+	marginHeadroom := math.Max(0, MaxMarginUsagePct-ctx.Account.MarginUsedPct)
 
 	runtime := promptRuntime{
 		CurrentTime:    ctx.CurrentTime,
@@ -811,6 +920,7 @@ func buildPromptSnapshot(ctx *Context) promptSnapshot {
 		RecentRiskAlerts:  ctx.RecentRiskAlerts,
 		RecentGuardrails:  ctx.RecentGuardrails,
 		AuxOpinions:       buildAuxOpinionsSnapshot(ctx),
+		AuxConsensus:      buildAuxConsensusSnapshot(ctx),
 		EnsembleMeta:      ensembleMeta,
 	}
 }
@@ -1153,6 +1263,39 @@ func buildAuxOpinionsSnapshot(ctx *Context) []promptAuxOpinion {
 	return result
 }
 
+func buildAuxConsensusSnapshot(ctx *Context) *promptAuxConsensus {
+	if ctx == nil || ctx.AuxConsensus == nil {
+		return nil
+	}
+
+	src := ctx.AuxConsensus
+	snapshot := &promptAuxConsensus{
+		TotalModels: src.TotalModels,
+		ModelsOpen:  src.OpenCount,
+		ModelsWait:  src.WaitCount,
+		Majority:    src.Majority,
+	}
+
+	if len(src.OpenModels) > 0 {
+		snapshot.OpenModels = append([]string(nil), src.OpenModels...)
+	}
+	if len(src.WaitModels) > 0 {
+		snapshot.WaitModels = append([]string(nil), src.WaitModels...)
+	}
+
+	if len(src.SymbolVotes) > 0 {
+		snapshot.SymbolVotes = make(map[string]promptSymbolSupport, len(src.SymbolVotes))
+		for symbol, vote := range src.SymbolVotes {
+			snapshot.SymbolVotes[symbol] = promptSymbolSupport{
+				Long:  append([]string(nil), vote.LongModels...),
+				Short: append([]string(nil), vote.ShortModels...),
+			}
+		}
+	}
+
+	return snapshot
+}
+
 func deriveTrendBias(data *market.Data) string {
 	if data.LongerTermContext != nil {
 		lastMACD := lastFloat(data.LongerTermContext.MACDValues)
@@ -1446,6 +1589,10 @@ func appendIfMissing(items []string, candidate string) []string {
 		}
 	}
 	return append(items, candidate)
+}
+
+func isDecisionOpenAction(action string) bool {
+	return action == "open_long" || action == "open_short"
 }
 
 func minInt(a, b int) int {

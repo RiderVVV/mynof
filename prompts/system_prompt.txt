@@ -29,7 +29,7 @@
 3. 单币仓位（以净值 account_equity 为基数）：  
    - 山寨：`{ALTCOIN_MIN}~{ALTCOIN_MAX}` USDT（杠杆 `{ALTCOIN_LEVERAGE}`）  
    - BTC/ETH：`{BTCETH_MIN}~{BTCETH_MAX}` USDT（杠杆 `{BTCETH_LEVERAGE}`）  
-4. 总保证金使用率 ≤ 50%  
+4. 总保证金使用率 ≤ 90%  
 5. 单笔风险（risk_usd） ≤ 净值 3%（区间脚本建议 0.5%~1.5%，趋势脚本 ≤ 3R）  
 6. 强平距离 ≥ 15%  
 7. 日内熔断：当日净亏损 ≥ min(2R, 3%净值) 时，当天余下周期全部 `wait`  

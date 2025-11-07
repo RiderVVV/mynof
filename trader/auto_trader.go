@@ -521,14 +521,17 @@ func (at *AutoTrader) runCycle() error {
 		return nil
 	}
 
+	ctx.AuxConsensus = nil
 	if len(at.ensembleModels) > 0 {
 		auxOpinions := at.collectAuxOpinions(ctx, record)
 		if len(auxOpinions) > 0 {
 			ctx.AuxOpinions = auxOpinions
+			ctx.AuxConsensus = decision.ComputeAuxConsensus(auxOpinions)
 			ctx.EnsembleMode = at.ensembleMode
 			ctx.EnsembleSummary = at.ensembleSummaryMode
 		} else {
 			ctx.AuxOpinions = nil
+			ctx.AuxConsensus = nil
 			ctx.EnsembleMode = ""
 			ctx.EnsembleSummary = ""
 		}
@@ -1992,7 +1995,9 @@ func (at *AutoTrader) generateRiskFlags(ctx *decision.Context, decisions []decis
 
 	riskBudget := ctx.Account.TotalEquity * 0.03
 	marginUsed := ctx.Account.MarginUsedPct
-	marginHeadroom := 90 - marginUsed
+	marginHeadroom := decision.MaxMarginUsagePct - marginUsed
+	auxConsensus := ctx.AuxConsensus
+	majorityWait := auxConsensus != nil && auxConsensus.Majority == "wait" && auxConsensus.TotalModels > 0
 
 	openActions := 0
 	for _, d := range decisions {
@@ -2020,6 +2025,41 @@ func (at *AutoTrader) generateRiskFlags(ctx *decision.Context, decisions []decis
 	for _, d := range decisions {
 		if !isOpenAction(d.Action) {
 			continue
+		}
+
+		if majorityWait {
+			detail := fmt.Sprintf("%d/%d 个辅助模型建议观望", auxConsensus.WaitCount, auxConsensus.TotalModels)
+			flags = appendRiskFlagOnce(flags, decision.RiskFlag{
+				Symbol:   d.Symbol,
+				Action:   d.Action,
+				Issue:    "aux_majority_wait",
+				Severity: "high",
+				Detail:   detail,
+			})
+		} else if auxConsensus != nil && auxConsensus.OpenCount > 0 {
+			if supporters, ok := auxDirectionalSupport(auxConsensus, d.Symbol, d.Action); !ok {
+				openList := strings.Join(auxConsensus.OpenModels, ", ")
+				if openList == "" {
+					openList = "无"
+				}
+				detail := fmt.Sprintf("无辅助模型支持 %s %s；当前开仓模型: %s", d.Symbol, d.Action, openList)
+				flags = appendRiskFlagOnce(flags, decision.RiskFlag{
+					Symbol:   d.Symbol,
+					Action:   d.Action,
+					Issue:    "aux_consensus_conflict",
+					Severity: "medium",
+					Detail:   detail,
+				})
+			} else if len(supporters) > 0 && len(supporters) < auxConsensus.OpenCount {
+				detail := fmt.Sprintf("%s %s 仅获得 %d/%d 辅助模型支持", d.Symbol, d.Action, len(supporters), auxConsensus.OpenCount)
+				flags = appendRiskFlagOnce(flags, decision.RiskFlag{
+					Symbol:   d.Symbol,
+					Action:   d.Action,
+					Issue:    "aux_support_partial",
+					Severity: "low",
+					Detail:   detail,
+				})
+			}
 		}
 
 		if riskBudget > 0 && d.RiskUSD > riskBudget*1.05 {
@@ -2051,21 +2091,21 @@ func (at *AutoTrader) generateRiskFlags(ctx *decision.Context, decisions []decis
 			}
 		}
 
-		if marginUsed >= 90 {
+		if marginUsed >= decision.MaxMarginUsagePct {
 			flags = appendRiskFlagOnce(flags, decision.RiskFlag{
 				Symbol:   d.Symbol,
 				Action:   d.Action,
 				Issue:    "margin_usage_critical",
 				Severity: "high",
-				Detail:   fmt.Sprintf("margin_used_pct %.1f >= 90%%", marginUsed),
+				Detail:   fmt.Sprintf("margin_used_pct %.1f >= %.0f%%", marginUsed, decision.MaxMarginUsagePct),
 			})
-		} else if marginUsed >= 85 {
+		} else if marginUsed >= decision.MaxMarginUsagePct-5 {
 			flags = appendRiskFlagOnce(flags, decision.RiskFlag{
 				Symbol:   d.Symbol,
 				Action:   d.Action,
 				Issue:    "margin_usage_high",
 				Severity: "medium",
-				Detail:   fmt.Sprintf("margin_used_pct %.1f >= 85%%", marginUsed),
+				Detail:   fmt.Sprintf("margin_used_pct %.1f >= %.0f%%", marginUsed, decision.MaxMarginUsagePct-5),
 			})
 		}
 
@@ -2141,6 +2181,30 @@ func appendRiskFlagOnce(flags []decision.RiskFlag, flag decision.RiskFlag) []dec
 		}
 	}
 	return append(flags, flag)
+}
+
+func auxDirectionalSupport(ac *decision.AuxConsensus, symbol, action string) ([]string, bool) {
+	if ac == nil || len(ac.SymbolVotes) == 0 || symbol == "" {
+		return nil, false
+	}
+	key := strings.ToUpper(strings.TrimSpace(symbol))
+	vote, ok := ac.SymbolVotes[key]
+	if !ok || vote == nil {
+		return nil, false
+	}
+
+	switch action {
+	case "open_long":
+		if len(vote.LongModels) > 0 {
+			return vote.LongModels, true
+		}
+	case "open_short":
+		if len(vote.ShortModels) > 0 {
+			return vote.ShortModels, true
+		}
+	}
+
+	return nil, false
 }
 
 // executeDecisionWithRecord 执行AI决策并记录详细信息
