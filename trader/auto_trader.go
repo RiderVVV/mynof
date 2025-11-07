@@ -16,6 +16,10 @@ import (
 	"time"
 )
 
+const (
+	minOrderNotionalUSD = 5.1 // 略高于交易所 5 USDT 的硬性下限，避免因边界舍入被拒单
+)
+
 // AutoTraderConfig 自动交易配置（简化版 - AI全权决策）
 type AutoTraderConfig struct {
 	// Trader标识
@@ -946,9 +950,17 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		} else {
 			at.positionPnLHigh[posKey] = pnlPct
 		}
-		drawdownFromPeak := peakPnL - pnlPct
-		if drawdownFromPeak < 0 {
-			drawdownFromPeak = 0
+
+		drawdownFromPeakPoints := peakPnL - pnlPct
+		if drawdownFromPeakPoints < 0 {
+			drawdownFromPeakPoints = 0
+		}
+		drawdownFromPeakRatio := 0.0
+		if peakPnL > 0 {
+			drawdownFromPeakRatio = (drawdownFromPeakPoints / peakPnL) * 100
+			if drawdownFromPeakRatio < 0 {
+				drawdownFromPeakRatio = 0
+			}
 		}
 
 		positionInfos = append(positionInfos, decision.PositionInfo{
@@ -961,7 +973,7 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 			UnrealizedPnL:        unrealizedPnl,
 			UnrealizedPnLPct:     pnlPct,
 			PeakUnrealizedPnLPct: peakPnL,
-			DrawdownFromPeakPct:  drawdownFromPeak,
+			DrawdownFromPeakPct:  drawdownFromPeakRatio,
 			LiquidationPrice:     liquidationPrice,
 			MarginUsed:           marginUsed,
 			UpdateTime:           updateTime,
@@ -2270,6 +2282,9 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 	if decision.PositionSizeUSD <= 0 {
 		return fmt.Errorf("守护调整后仓位为0，取消开仓")
 	}
+	if decision.PositionSizeUSD < minOrderNotionalUSD {
+		return fmt.Errorf("计划名义金额 %.2f USDT 低于交易所最小下单 %.2f USDT，取消开仓", decision.PositionSizeUSD, minOrderNotionalUSD)
+	}
 
 	// 计算数量（根据可能调整后的仓位大小）
 	quantity := decision.PositionSizeUSD / marketData.CurrentPrice
@@ -2350,6 +2365,9 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
 	}
 	if decision.PositionSizeUSD <= 0 {
 		return fmt.Errorf("守护调整后仓位为0，取消开仓")
+	}
+	if decision.PositionSizeUSD < minOrderNotionalUSD {
+		return fmt.Errorf("计划名义金额 %.2f USDT 低于交易所最小下单 %.2f USDT，取消开仓", decision.PositionSizeUSD, minOrderNotionalUSD)
 	}
 
 	// 计算数量
