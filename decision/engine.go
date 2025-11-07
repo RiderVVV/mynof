@@ -1509,6 +1509,13 @@ func extractDecisions(response string) ([]Decision, error) {
 		return extractDecisionsFromObject(trimmed)
 	}
 
+	// 优先解析 ```json fenced code block（通常是最终决策）
+	if fenced := extractJSONCodeBlock(trimmed); fenced != "" {
+		if decisions, err := decodeDecisionArray(fenced); err == nil {
+			return decisions, nil
+		}
+	}
+
 	arrayStart := strings.Index(trimmed, "[")
 	if arrayStart == -1 {
 		return nil, fmt.Errorf("无法找到JSON数组起始")
@@ -1521,20 +1528,61 @@ func extractDecisions(response string) ([]Decision, error) {
 	}
 
 	jsonContent := strings.TrimSpace(trimmed[arrayStart : arrayEnd+1])
+	return decodeDecisionArray(jsonContent)
+}
 
+func decodeDecisionArray(jsonContent string) ([]Decision, error) {
 	// 🔧 修复常见的JSON格式错误：缺少引号的字段值
-	// 匹配: "reasoning": 内容"}  或  "reasoning": 内容}  (没有引号)
-	// 修复为: "reasoning": "内容"}
-	// 使用简单的字符串扫描而不是正则表达式
 	jsonContent = fixMissingQuotes(jsonContent)
 
-	// 解析JSON
 	var decisions []Decision
 	if err := json.Unmarshal([]byte(jsonContent), &decisions); err != nil {
 		return nil, fmt.Errorf("JSON解析失败: %w\nJSON内容: %s", err, jsonContent)
 	}
 
 	return decisions, nil
+}
+
+func extractJSONCodeBlock(s string) string {
+	const fence = "```"
+	searchStart := 0
+	var candidate string
+
+	for searchStart < len(s) {
+		start := strings.Index(s[searchStart:], fence)
+		if start == -1 {
+			break
+		}
+		start += searchStart
+
+		langStart := start + len(fence)
+		langEnd := strings.IndexByte(s[langStart:], '\n')
+		if langEnd == -1 {
+			break
+		}
+		langEnd += langStart
+
+		langLine := strings.TrimSpace(s[langStart:langEnd])
+		blockStart := langEnd + 1
+		end := strings.Index(s[blockStart:], fence)
+		if end == -1 {
+			break
+		}
+		end += blockStart
+
+		block := strings.TrimSpace(s[blockStart:end])
+		lang := strings.ToLower(langLine)
+
+		if lang == "" || strings.Contains(lang, "json") || strings.Contains(lang, "decision") {
+			if strings.HasPrefix(block, "[") || strings.HasPrefix(block, "{") {
+				candidate = block
+			}
+		}
+
+		searchStart = end + len(fence)
+	}
+
+	return candidate
 }
 
 func extractDecisionsFromObject(s string) ([]Decision, error) {
@@ -1625,20 +1673,71 @@ func findMatchingBracket(s string, start int) int {
 	return -1
 }
 
+func normalizeStrategyHint(input string) (string, bool) {
+	cleaned := strings.ToLower(strings.TrimSpace(removeInvisibleRunes(input)))
+	cleaned = strings.ReplaceAll(cleaned, "-", "_")
+	cleaned = strings.ReplaceAll(cleaned, " ", "_")
+	cleaned = strings.ReplaceAll(cleaned, "　", "_") // 全角空格
+	cleaned = collapseUnderscores(cleaned)
+
+	switch cleaned {
+	case "", "auto":
+		return "", true
+	case "trend", "trending":
+		return "trend", true
+	case "range", "ranging", "range_trade":
+		return "range", true
+	case "range_developing", "range_develop", "range_dev", "developing_range":
+		return "range_developing", true
+	case "transitional", "neutral", "balancing":
+		return "transitional", true
+	case "mean_reversion", "meanreversion":
+		return "range", true
+	case "momentum":
+		return "trend", true
+	}
+
+	return cleaned, false
+}
+
+func removeInvisibleRunes(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '\u200b', '\u200c', '\u200d', '\ufeff':
+			return -1
+		}
+		return r
+	}, s)
+}
+
+func collapseUnderscores(s string) string {
+	if s == "" {
+		return s
+	}
+
+	var b strings.Builder
+	b.Grow(len(s))
+
+	prevUnderscore := false
+	for _, r := range s {
+		if r == '_' {
+			if prevUnderscore {
+				continue
+			}
+			prevUnderscore = true
+		} else {
+			prevUnderscore = false
+		}
+		b.WriteRune(r)
+	}
+
+	return strings.Trim(b.String(), "_")
+}
+
 // validateDecision 验证单个决策的有效性
 func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoinLeverage int) error {
-	strategyHint := strings.ToLower(strings.TrimSpace(d.StrategyHint))
-	switch strategyHint {
-	case "", "auto":
-		strategyHint = ""
-	case "trend", "range", "range_developing":
-	case "transitional", "neutral", "balancing":
-		strategyHint = "transitional"
-	case "mean_reversion":
-		strategyHint = "range"
-	case "momentum":
-		strategyHint = "trend"
-	default:
+	strategyHint, ok := normalizeStrategyHint(d.StrategyHint)
+	if !ok {
 		return fmt.Errorf("strategy_hint 不支持的取值: %s", d.StrategyHint)
 	}
 
@@ -1781,14 +1880,16 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 			reducedMaxPosition := maxPositionValue * 0.75
 			reducedTolerance := math.Max(tolerance, reducedMaxPosition*0.01)
 			if d.PositionSizeUSD > reducedMaxPosition+reducedTolerance {
-				return fmt.Errorf("range_developing 策略仓位需≤上限%.2f USDT (75%%)，当前%.2f USDT", reducedMaxPosition, d.PositionSizeUSD)
+				log.Printf("⚠️  range_developing 仓位超限: %s 请求 %.2f USDT，允许上限 %.2f USDT，自动收敛", d.Symbol, d.PositionSizeUSD, reducedMaxPosition)
+				d.PositionSizeUSD = reducedMaxPosition
 			}
 			if d.RiskUSD <= 0 {
 				return fmt.Errorf("range_developing 策略必须提供 risk_usd，并缩减至风险预算60%%以内")
 			}
 			maxRiskAllowed := riskBudget * 0.6
 			if d.RiskUSD > maxRiskAllowed+1e-6 {
-				return fmt.Errorf("range_developing 策略 risk_usd %.2f 超过上限 %.2f (风险预算60%%)", d.RiskUSD, maxRiskAllowed)
+				log.Printf("⚠️  range_developing risk_usd超限: %s 请求 %.2f USD，上限 %.2f USD，自动收敛", d.Symbol, d.RiskUSD, maxRiskAllowed)
+				d.RiskUSD = maxRiskAllowed
 			}
 		}
 
