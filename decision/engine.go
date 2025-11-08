@@ -71,6 +71,8 @@ type Context struct {
 	RuntimeMinutes   int                      `json:"runtime_minutes"`
 	CallCount        int                      `json:"call_count"`
 	Account          AccountInfo              `json:"account"`
+	PerformanceState string                   `json:"-"` // derived risk state (drawdown/loss_streak/positive)
+	SharpeCooling    string                   `json:"-"` // derived cooling level (only_high_confidence_trades/halt_xx)
 	Positions        []PositionInfo           `json:"positions"`
 	CandidateCoins   []CandidateCoin          `json:"candidate_coins"`
 	MarketDataMap    map[string]*market.Data  `json:"-"` // 不序列化，但内部使用
@@ -858,40 +860,59 @@ func buildPromptSnapshot(ctx *Context) promptSnapshot {
 		},
 	}
 
+	if ctx.SharpeCooling != "" {
+		risk.SharpeCoolingLevel = ctx.SharpeCooling
+	}
+	if ctx.PerformanceState != "" {
+		risk.PerformanceState = ctx.PerformanceState
+	}
+
 	performance := buildPerformanceSnapshot(ctx.Performance)
-	if performance != nil {
-		perfState := ""
+	if performance != nil && (risk.SharpeCoolingLevel == "" || risk.PerformanceState == "") {
+		perfState := risk.PerformanceState
+		cooling := risk.SharpeCoolingLevel
 
-		if performance.RecentLossStreak >= 3 || performance.RecentPnL <= -riskBudget {
-			risk.SharpeCoolingLevel = "halt_3_cycles"
-			perfState = "loss_streak"
-		} else if performance.RecentLossStreak >= 2 || performance.RecentPnL <= -riskBudget*0.5 {
-			risk.SharpeCoolingLevel = "only_high_confidence_trades"
-			perfState = "drawdown"
-		}
-
-		if performance.TotalTrades >= 5 {
-			if performance.SharpeRatio < -0.5 {
-				risk.SharpeCoolingLevel = "halt_6_cycles"
+		if cooling == "" {
+			if performance.RecentLossStreak >= 3 || performance.RecentPnL <= -riskBudget {
+				cooling = "halt_3_cycles"
 				if perfState == "" {
 					perfState = "loss_streak"
 				}
-			} else if performance.SharpeRatio < 0 && risk.SharpeCoolingLevel == "" {
-				risk.SharpeCoolingLevel = "only_high_confidence_trades"
+			} else if performance.RecentLossStreak >= 2 || performance.RecentPnL <= -riskBudget*0.5 {
+				cooling = "only_high_confidence_trades"
 				if perfState == "" {
 					perfState = "drawdown"
 				}
 			}
 		}
 
-		if performance.RecentWinStreak >= 2 && performance.RecentPnL > 0 {
-			if risk.SharpeCoolingLevel == "" {
+		if performance.TotalTrades >= 5 {
+			if performance.SharpeRatio < -0.5 {
+				if cooling == "" || cooling == "only_high_confidence_trades" {
+					cooling = "halt_6_cycles"
+				}
+				if perfState == "" {
+					perfState = "loss_streak"
+				}
+			} else if performance.SharpeRatio < 0 && cooling == "" {
+				cooling = "only_high_confidence_trades"
+				if perfState == "" {
+					perfState = "drawdown"
+				}
+			}
+		}
+
+		if performance.RecentWinStreak >= 2 && performance.RecentPnL > 0 && cooling == "" {
+			if perfState == "" {
 				perfState = "positive"
 			}
 		}
 
-		if perfState != "" {
+		if perfState != "" && risk.PerformanceState == "" {
 			risk.PerformanceState = perfState
+		}
+		if cooling != "" && risk.SharpeCoolingLevel == "" {
+			risk.SharpeCoolingLevel = cooling
 		}
 	}
 

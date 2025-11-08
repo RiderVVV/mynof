@@ -159,6 +159,7 @@ type AutoTrader struct {
 	ensembleModels        []ensembleModel
 	positionTargets       map[string]*positionManagementState
 	lastMarketData        map[string]*market.Data
+	activeContext         *decision.Context
 }
 
 type profitProtectionThresholds struct {
@@ -542,6 +543,11 @@ func (at *AutoTrader) runCycle() error {
 		}
 		return nil
 	}
+
+	at.activeContext = ctx
+	defer func() {
+		at.activeContext = nil
+	}()
 
 	ctx.AuxConsensus = nil
 	if len(at.ensembleModels) > 0 {
@@ -1147,7 +1153,48 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		RecentGuardrails: recentGuardrails,
 	}
 
+	perfState, cooling := derivePerformanceCoolingState(performance, ctx.Account.TotalEquity*0.03)
+	ctx.PerformanceState = perfState
+	ctx.SharpeCooling = cooling
+
 	return ctx, nil
+}
+
+func derivePerformanceCoolingState(perf *logger.PerformanceAnalysis, riskBudget float64) (string, string) {
+	if perf == nil {
+		return "", ""
+	}
+
+	perfState := ""
+	cooling := ""
+
+	if perf.RecentLossStreak >= 3 || perf.RecentPnL <= -riskBudget {
+		cooling = "halt_3_cycles"
+		perfState = "loss_streak"
+	} else if perf.RecentLossStreak >= 2 || perf.RecentPnL <= -riskBudget*0.5 {
+		cooling = "only_high_confidence_trades"
+		perfState = "drawdown"
+	}
+
+	if perf.TotalTrades >= 5 {
+		if perf.SharpeRatio < -0.5 {
+			cooling = "halt_6_cycles"
+			if perfState == "" {
+				perfState = "loss_streak"
+			}
+		} else if perf.SharpeRatio < 0 && cooling == "" {
+			cooling = "only_high_confidence_trades"
+			if perfState == "" {
+				perfState = "drawdown"
+			}
+		}
+	}
+
+	if perf.RecentWinStreak >= 2 && perf.RecentPnL > 0 && cooling == "" {
+		perfState = "positive"
+	}
+
+	return perfState, cooling
 }
 
 func clampFloat(min, max, value float64) float64 {
@@ -1158,6 +1205,13 @@ func clampFloat(min, max, value float64) float64 {
 		return max
 	}
 	return value
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func classifyMarketRegime(data *market.Data) string {
@@ -1242,6 +1296,13 @@ func (at *AutoTrader) applyOpenGuard(decision *decision.Decision, marketData *ma
 		return minHold, strategy, nil
 	}
 
+	if side == "short" {
+		if blocked, reason := counterTrendShortReason(marketData); blocked {
+			log.Printf("  🛑 守护拒绝: %s 空单逆势 (%s)", decision.Symbol, reason)
+			return 0, strategy, fmt.Errorf("counter-trend short guard: %s", reason)
+		}
+	}
+
 	if strategy == "range" {
 		if marketData.RangeState == nil {
 			log.Printf("  ⚠ 策略hint=range 但缺少 range_state，降级为 transitional")
@@ -1289,6 +1350,23 @@ func (at *AutoTrader) applyOpenGuard(decision *decision.Decision, marketData *ma
 				isMatureRange := touchesBothConfirmed && ageMature && adxMature
 				isDevelopingRange := (touchesBothConfirmed && ageDeveloping && adxDeveloping) ||
 					(touchesFlexible && ageDeveloping && adxRelaxed)
+
+				if !isDevelopingRange {
+					atrPct := 0.0
+					if rs.ATR14 > 0 && entryPrice > 0 {
+						atrPct = (rs.ATR14 / entryPrice) * 100
+					}
+					rsi15 := 0.0
+					if marketData.MidTermContext != nil {
+						rsi15 = marketData.MidTermContext.RSI14
+					}
+					if rs.TouchesHigh >= 2 && rs.TouchesLow >= 2 && rs.AgeBars1h >= 8 && atrPct >= 2.0 {
+						if (side == "short" && rsi15 >= 67) || (side == "long" && rsi15 <= 33) {
+							log.Printf("  ⚠ 区间触顶/触底尚不足但满足RSI/ATR过滤 (touch_high=%d touch_low=%d rsi15=%.1f atr%%=%.2f)，降级为 range_developing", rs.TouchesHigh, rs.TouchesLow, rsi15, atrPct)
+							isDevelopingRange = true
+						}
+					}
+				}
 
 				if !isMatureRange {
 					if !isDevelopingRange {
@@ -1367,6 +1445,10 @@ func (at *AutoTrader) applyOpenGuard(decision *decision.Decision, marketData *ma
 					}
 				}
 
+				if tightened := applyRangeStopTightening(decision, marketData, side); tightened != "" {
+					log.Printf("  🔒 区间止损收紧: %s", tightened)
+				}
+
 				if decision.RiskUSD > 0 && decision.StopLoss > 0 {
 					riskDistance := math.Abs(entryPrice - decision.StopLoss)
 					if riskDistance > 0 {
@@ -1418,6 +1500,144 @@ func (at *AutoTrader) applyOpenGuard(decision *decision.Decision, marketData *ma
 
 	log.Printf("  🛡 执行守护: %s 设置最小持仓 %.0f 分钟 (策略=%s, regime=%s)", decision.Symbol, minHold.Minutes(), strategy, regime)
 	return minHold, strategy, nil
+}
+
+func applyRangeStopTightening(decision *decision.Decision, data *market.Data, side string) string {
+	if decision == nil || data == nil || data.RangeState == nil {
+		return ""
+	}
+	if decision.StopLoss <= 0 || data.CurrentPrice <= 0 {
+		return ""
+	}
+
+	rs := data.RangeState
+	entry := data.CurrentPrice
+
+	buffer := rs.ATR14 * 0.25
+	if buffer <= 0 {
+		buffer = entry * 0.0025
+	}
+	if buffer <= 0 {
+		return ""
+	}
+
+	switch side {
+	case "short":
+		if rs.High <= 0 {
+			return ""
+		}
+		cap := rs.High + buffer
+		if decision.StopLoss > cap {
+			original := decision.StopLoss
+			decision.StopLoss = cap
+			return fmt.Sprintf("short: 止损 %.5f -> %.5f (high %.5f + buffer %.5f)", original, decision.StopLoss, rs.High, buffer)
+		}
+	case "long":
+		if rs.Low <= 0 {
+			return ""
+		}
+		cap := rs.Low - buffer
+		if cap > 0 && decision.StopLoss < cap {
+			original := decision.StopLoss
+			decision.StopLoss = cap
+			return fmt.Sprintf("long: 止损 %.5f -> %.5f (low %.5f - buffer %.5f)", original, decision.StopLoss, rs.Low, buffer)
+		}
+	}
+
+	return ""
+}
+
+func counterTrendShortReason(data *market.Data) (bool, string) {
+	if data == nil {
+		return false, ""
+	}
+
+	var reasons []string
+	if data.MidTermContext != nil && data.MidTermContext.RSI14 > 65 {
+		reasons = append(reasons, fmt.Sprintf("15m RSI %.1f>65", data.MidTermContext.RSI14))
+	}
+	if data.HourlyContext != nil && data.HourlyContext.RSI14 > 65 {
+		reasons = append(reasons, fmt.Sprintf("1h RSI %.1f>65", data.HourlyContext.RSI14))
+	}
+
+	bullCount := 0
+	if isBullishSnapshot(data.MidTermContext) {
+		bullCount++
+	}
+	if isBullishSnapshot(data.HourlyContext) {
+		bullCount++
+	}
+	if bullCount >= 2 {
+		reasons = append(reasons, "15m/1h 均为多头结构")
+	}
+
+	if len(reasons) == 0 {
+		return false, ""
+	}
+	return true, strings.Join(reasons, "; ")
+}
+
+func isBullishSnapshot(tf *market.TimeframeSnapshot) bool {
+	if tf == nil {
+		return false
+	}
+	return tf.EMA20 > tf.EMA50 && tf.MACD >= 0
+}
+
+func (at *AutoTrader) applyDrawdownPositionControls(decision *decision.Decision, side string) {
+	if decision == nil || at.activeContext == nil {
+		return
+	}
+
+	state := strings.ToLower(strings.TrimSpace(at.activeContext.PerformanceState))
+	if state == "" {
+		return
+	}
+
+	var scale float64
+	switch state {
+	case "loss_streak":
+		scale = 0.4
+	case "drawdown":
+		scale = 0.6
+	default:
+		return
+	}
+
+	if decision.PositionSizeUSD > 0 {
+		original := decision.PositionSizeUSD
+		decision.PositionSizeUSD = original * scale
+		log.Printf("  ⚖️ Drawdown守护: %s %s 缩减仓位 %.2f -> %.2f USDT", decision.Symbol, side, original, decision.PositionSizeUSD)
+	}
+	if decision.RiskUSD > 0 {
+		decision.RiskUSD = decision.RiskUSD * scale
+	}
+
+	isMajor := strings.EqualFold(decision.Symbol, "BTCUSDT") || strings.EqualFold(decision.Symbol, "ETHUSDT")
+	maxLev := 1
+	if isMajor {
+		maxLev = at.config.BTCETHLeverage
+		if state == "loss_streak" {
+			maxLev = minInt(maxLev, 3)
+		} else {
+			maxLev = minInt(maxLev, 4)
+		}
+	} else {
+		maxLev = at.config.AltcoinLeverage
+		if state == "loss_streak" {
+			maxLev = minInt(maxLev, 2)
+		} else {
+			maxLev = minInt(maxLev, 3)
+		}
+	}
+	if maxLev < 1 {
+		maxLev = 1
+	}
+
+	if decision.Leverage > maxLev {
+		log.Printf("  ⚖️ Drawdown守护: %s %s 杠杆 %dx -> %dx", decision.Symbol, side, decision.Leverage, maxLev)
+		decision.Leverage = maxLev
+	}
 }
 
 func (at *AutoTrader) registerPositionTargets(decision *decision.Decision, quantity, entryPrice float64, side string) {
@@ -2044,6 +2264,8 @@ func (at *AutoTrader) generateRiskFlags(ctx *decision.Context, decisions []decis
 	marginHeadroom := decision.MaxMarginUsagePct - marginUsed
 	auxConsensus := ctx.AuxConsensus
 	majorityWait := auxConsensus != nil && auxConsensus.Majority == "wait" && auxConsensus.TotalModels > 0
+	perfState := strings.ToLower(strings.TrimSpace(ctx.PerformanceState))
+	auxHistory := countRecentRiskAlerts(ctx.RecentRiskAlerts, "aux_majority_wait")
 
 	openActions := 0
 	for _, d := range decisions {
@@ -2074,14 +2296,23 @@ func (at *AutoTrader) generateRiskFlags(ctx *decision.Context, decisions []decis
 		}
 
 		if majorityWait {
-			detail := fmt.Sprintf("%d/%d 个辅助模型建议观望", auxConsensus.WaitCount, auxConsensus.TotalModels)
-			flags = appendRiskFlagOnce(flags, decision.RiskFlag{
-				Symbol:   d.Symbol,
-				Action:   d.Action,
-				Issue:    "aux_majority_wait",
-				Severity: "high",
-				Detail:   detail,
-			})
+			severity := "high"
+			if auxConsensus.TotalModels <= 1 || auxHistory >= 1 {
+				severity = "medium"
+			}
+			if auxHistory >= 3 {
+				severity = ""
+			}
+			if severity != "" {
+				detail := fmt.Sprintf("%d/%d 个辅助模型建议观望 (历史触发%d次)", auxConsensus.WaitCount, auxConsensus.TotalModels, auxHistory)
+				flags = appendRiskFlagOnce(flags, decision.RiskFlag{
+					Symbol:   d.Symbol,
+					Action:   d.Action,
+					Issue:    "aux_majority_wait",
+					Severity: severity,
+					Detail:   detail,
+				})
+			}
 		} else if auxConsensus != nil && auxConsensus.OpenCount > 0 {
 			if supporters, ok := auxDirectionalSupport(auxConsensus, d.Symbol, d.Action); !ok {
 				openList := strings.Join(auxConsensus.OpenModels, ", ")
@@ -2135,6 +2366,18 @@ func (at *AutoTrader) generateRiskFlags(ctx *decision.Context, decisions []decis
 					Detail:   detail,
 				})
 			}
+
+			if d.Action == "open_short" {
+				if blocked, reason := counterTrendShortReason(data); blocked {
+					flags = appendRiskFlagOnce(flags, decision.RiskFlag{
+						Symbol:   d.Symbol,
+						Action:   d.Action,
+						Issue:    "counter_trend_short",
+						Severity: "high",
+						Detail:   reason,
+					})
+				}
+			}
 		}
 
 		if marginUsed >= decision.MaxMarginUsagePct {
@@ -2176,7 +2419,16 @@ func (at *AutoTrader) generateRiskFlags(ctx *decision.Context, decisions []decis
 		}
 
 		if hasSharpe {
-			if sharpe < -0.5 {
+			switch {
+			case perfState == "loss_streak":
+				flags = appendRiskFlagOnce(flags, decision.RiskFlag{
+					Symbol:   d.Symbol,
+					Action:   d.Action,
+					Issue:    "strategy_loss_streak",
+					Severity: "high",
+					Detail:   fmt.Sprintf("loss_streak 状态，sharpe_ratio %.2f", sharpe),
+				})
+			case sharpe < -0.5:
 				flags = appendRiskFlagOnce(flags, decision.RiskFlag{
 					Symbol:   d.Symbol,
 					Action:   d.Action,
@@ -2184,7 +2436,7 @@ func (at *AutoTrader) generateRiskFlags(ctx *decision.Context, decisions []decis
 					Severity: "high",
 					Detail:   fmt.Sprintf("sharpe_ratio %.2f < -0.5，需要暂停新增仓位", sharpe),
 				})
-			} else if sharpe < 0 {
+			case sharpe < 0 && perfState != "drawdown":
 				flags = appendRiskFlagOnce(flags, decision.RiskFlag{
 					Symbol:   d.Symbol,
 					Action:   d.Action,
@@ -2227,6 +2479,19 @@ func appendRiskFlagOnce(flags []decision.RiskFlag, flag decision.RiskFlag) []dec
 		}
 	}
 	return append(flags, flag)
+}
+
+func countRecentRiskAlerts(alerts []decision.RiskFlag, issue string) int {
+	if len(alerts) == 0 || issue == "" {
+		return 0
+	}
+	count := 0
+	for _, flag := range alerts {
+		if flag.Issue == issue {
+			count++
+		}
+	}
+	return count
 }
 
 func auxDirectionalSupport(ac *decision.AuxConsensus, symbol, action string) ([]string, bool) {
@@ -2291,6 +2556,8 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 	if err != nil {
 		return err
 	}
+
+	at.applyDrawdownPositionControls(decision, "long")
 
 	minHoldDuration, guardStrategy, guardErr := at.applyOpenGuard(decision, marketData, "long")
 	if guardErr != nil {
@@ -2375,6 +2642,8 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
 	if err != nil {
 		return err
 	}
+
+	at.applyDrawdownPositionControls(decision, "short")
 
 	minHoldDuration, guardStrategy, guardErr := at.applyOpenGuard(decision, marketData, "short")
 	if guardErr != nil {
