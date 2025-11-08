@@ -116,6 +116,12 @@ const (
 	simpleTrailingActivationPct        = 0.5  // 简易守护至少需0.5%峰值收益
 	simpleTrailingDrawdownRatio        = 0.2  // 峰值回撤达到20%时强制锁盈
 	simpleTrailingDefaultFeePct        = 0.03 // 默认万五双向 ≈0.03% 回本线
+	minProfitProtectPct                = 0.003
+	minProfitProtectUSD                = 1.0
+	minRangeTpProfitPct                = 0.003
+	minCloseHoldMinutes                = 10
+	minClosePnLPct                     = 0.2
+	rangeMidAtrBumpRatio               = 0.5
 )
 
 type positionTargetState struct {
@@ -694,6 +700,13 @@ func (at *AutoTrader) runCycle() error {
 
 	// 执行决策并记录结果
 	for _, d := range sortedDecisions {
+		if holdMinutes, pnlPct, deferClose := at.shouldDeferClose(&d, ctx); deferClose {
+			msg := fmt.Sprintf("⏸ 延迟平仓: %s %s 持仓%d分钟 | 浮动%.2f%%，等待最小观察窗口", d.Symbol, d.Action, holdMinutes, pnlPct)
+			log.Println(msg)
+			record.ExecutionLog = append(record.ExecutionLog, msg)
+			continue
+		}
+
 		actionRecord := logger.DecisionAction{
 			Action:    d.Action,
 			Symbol:    d.Symbol,
@@ -1286,6 +1299,9 @@ func (at *AutoTrader) applyOpenGuard(decision *decision.Decision, marketData *ma
 	if strategy == "" {
 		strategy = "transitional"
 	}
+	if strategy == "trend" && minHold > 20*time.Minute {
+		minHold = 20 * time.Minute
+	}
 
 	if marketData == nil {
 		return minHold, strategy, nil
@@ -1325,6 +1341,15 @@ func (at *AutoTrader) applyOpenGuard(decision *decision.Decision, marketData *ma
 				log.Printf("  ⚠ 策略hint=range 但当前价格不在区间边界附近，降级为 transitional (price_location=%s)", rs.PriceLocation)
 				strategy = "transitional"
 			} else {
+				relevantTouches := rs.TouchesLow
+				if side == "short" {
+					relevantTouches = rs.TouchesHigh
+				}
+				if rs.AgeBars1h < 12 && relevantTouches < 3 {
+					log.Printf("  🧭 守护拒绝: %s 区间确认不足 (touches=%d, age_1h=%d) 等待更多确认后再开仓", decision.Symbol, relevantTouches, rs.AgeBars1h)
+					return 0, "range_gate_unconfirmed", fmt.Errorf("range guard: %s 需等待更多触碰或时间确认", decision.Symbol)
+				}
+
 				touchesStrongHigh := rs.TouchesHigh >= 3
 				touchesStrongLow := rs.TouchesLow >= 3
 				touchesSupportHigh := rs.TouchesHigh >= 2
@@ -1594,12 +1619,21 @@ func (at *AutoTrader) applyDrawdownPositionControls(decision *decision.Decision,
 		return
 	}
 
+	hint := strings.ToLower(strings.TrimSpace(decision.StrategyHint))
+	isTrend := hint == "trend" || hint == "momentum"
+
 	var scale float64
 	switch state {
 	case "loss_streak":
 		scale = 0.4
+		if isTrend {
+			scale = 0.5
+		}
 	case "drawdown":
 		scale = 0.6
+		if isTrend {
+			scale = 0.75
+		}
 	default:
 		return
 	}
@@ -1650,6 +1684,10 @@ func (at *AutoTrader) registerPositionTargets(decision *decision.Decision, quant
 
 	targets := make([]*positionTargetState, 0, len(decision.TakeProfitTargets)+1)
 	remaining := quantity
+	carryPortion := 0.0
+
+	strategy := strings.ToLower(at.positionGuardStrategy[posKey])
+	marketData := at.lastMarketData[strings.ToUpper(decision.Symbol)]
 
 	if len(decision.TakeProfitTargets) > 0 {
 		for _, tp := range decision.TakeProfitTargets {
@@ -1673,8 +1711,18 @@ func (at *AutoTrader) registerPositionTargets(decision *decision.Decision, quant
 				continue
 			}
 
+			price := at.adjustTargetPriceForRange(decision.Symbol, side, strategy, tp.Price, marketData)
+			profitPct := calcProfitPct(side, entryPrice, price)
+			if profitPct < minRangeTpProfitPct {
+				carryPortion += portion
+				continue
+			}
+
+			portion += carryPortion
+			carryPortion = 0
+
 			targets = append(targets, &positionTargetState{
-				Price:    tp.Price,
+				Price:    price,
 				Quantity: portion,
 				SizePct:  portion / quantity,
 				Kind:     tp.Kind,
@@ -1687,30 +1735,27 @@ func (at *AutoTrader) registerPositionTargets(decision *decision.Decision, quant
 		}
 	}
 
-	if remaining > 0 {
-		if decision.TakeProfit > 0 {
+	if remaining+carryPortion > 0 && decision.TakeProfit > 0 {
+		price := at.adjustTargetPriceForRange(decision.Symbol, side, strategy, decision.TakeProfit, marketData)
+		profitPct := calcProfitPct(side, entryPrice, price)
+		if profitPct >= minRangeTpProfitPct {
+			finalQty := remaining + carryPortion
 			targets = append(targets, &positionTargetState{
-				Price:    decision.TakeProfit,
-				Quantity: remaining,
-				SizePct:  remaining / quantity,
+				Price:    price,
+				Quantity: finalQty,
+				SizePct:  finalQty / quantity,
 				Kind:     "final",
 			})
 			remaining = 0
-		} else if len(targets) > 0 {
-			last := targets[len(targets)-1]
-			last.Quantity += remaining
-			last.SizePct = last.Quantity / quantity
-			remaining = 0
+			carryPortion = 0
 		}
 	}
 
-	if len(targets) == 0 && decision.TakeProfit > 0 {
-		targets = append(targets, &positionTargetState{
-			Price:    decision.TakeProfit,
-			Quantity: quantity,
-			SizePct:  1.0,
-			Kind:     "final",
-		})
+	if carryPortion > 0 && len(targets) > 0 {
+		last := targets[len(targets)-1]
+		last.Quantity += carryPortion
+		last.SizePct = last.Quantity / quantity
+		carryPortion = 0
 	}
 
 	if len(targets) == 0 {
@@ -1742,6 +1787,107 @@ func (at *AutoTrader) registerPositionTargets(decision *decision.Decision, quant
 		log.Printf("  🎯 分批止盈计划: %s %s [%s] 目标价%.4f 覆盖≈%.1f%% (%.4f)",
 			decision.Symbol, side, tag, tgt.Price, tgt.SizePct*100, tgt.Quantity)
 	}
+}
+
+func (at *AutoTrader) adjustTargetPriceForRange(symbol, side, strategy string, price float64, data *market.Data) float64 {
+	if price <= 0 || data == nil || data.RangeState == nil {
+		return price
+	}
+	if strategy != "range_developing" {
+		return price
+	}
+
+	rs := data.RangeState
+	mid := rs.Mid
+	if mid <= 0 || rs.ATR14 <= 0 && rs.Width <= 0 {
+		return price
+	}
+
+	bump := rs.ATR14 * rangeMidAtrBumpRatio
+	if bump <= 0 {
+		bump = rs.Width * 0.1
+	}
+	if bump <= 0 {
+		return price
+	}
+
+	switch strings.ToLower(side) {
+	case "long":
+		minPrice := mid + bump
+		if price < minPrice {
+			return minPrice
+		}
+	case "short":
+		maxPrice := mid - bump
+		if price > maxPrice {
+			return maxPrice
+		}
+	}
+
+	return price
+}
+
+func calcProfitPct(side string, entryPrice, targetPrice float64) float64 {
+	if entryPrice <= 0 || targetPrice <= 0 {
+		return 0
+	}
+	switch strings.ToLower(side) {
+	case "short":
+		return (entryPrice - targetPrice) / entryPrice
+	default:
+		return (targetPrice - entryPrice) / entryPrice
+	}
+}
+
+func (at *AutoTrader) shouldDeferClose(decision *decision.Decision, ctx *decision.Context) (int, float64, bool) {
+	if ctx == nil || decision == nil {
+		return 0, 0, false
+	}
+
+	var side string
+	switch decision.Action {
+	case "close_long":
+		side = "long"
+	case "close_short":
+		side = "short"
+	default:
+		return 0, 0, false
+	}
+
+	pos := findPositionInfo(ctx.Positions, decision.Symbol, side)
+	if pos == nil {
+		return 0, 0, false
+	}
+
+	holdMinutes := 0
+	if pos.UpdateTime > 0 {
+		now := time.Now()
+		seen := time.UnixMilli(pos.UpdateTime)
+		if now.After(seen) {
+			holdMinutes = int(now.Sub(seen).Minutes())
+		}
+	}
+
+	if holdMinutes >= minCloseHoldMinutes {
+		return 0, 0, false
+	}
+	if math.Abs(pos.UnrealizedPnLPct) >= minClosePnLPct {
+		return 0, 0, false
+	}
+
+	return holdMinutes, pos.UnrealizedPnLPct, true
+}
+
+func findPositionInfo(positions []decision.PositionInfo, symbol, side string) *decision.PositionInfo {
+	for i := range positions {
+		if !strings.EqualFold(positions[i].Symbol, symbol) {
+			continue
+		}
+		if strings.EqualFold(positions[i].Side, side) {
+			return &positions[i]
+		}
+	}
+	return nil
 }
 
 func (at *AutoTrader) computeProfitProtectionThresholds(pos decision.PositionInfo, marketCache map[string]*market.Data) (profitProtectionThresholds, error) {
@@ -2066,6 +2212,11 @@ func (at *AutoTrader) applyProfitProtection(ctx *decision.Context, record *logge
 			newPeak = true
 		}
 		if newPeak {
+			continue
+		}
+
+		profitEligible := currentPnL > 0 && (math.Abs(currentPnL) >= minProfitProtectPct || math.Abs(currentPnLUSD) >= minProfitProtectUSD)
+		if !profitEligible {
 			continue
 		}
 
@@ -2556,6 +2707,7 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 	if err != nil {
 		return err
 	}
+	at.lastMarketData[strings.ToUpper(decision.Symbol)] = marketData
 
 	at.applyDrawdownPositionControls(decision, "long")
 
@@ -2642,6 +2794,7 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
 	if err != nil {
 		return err
 	}
+	at.lastMarketData[strings.ToUpper(decision.Symbol)] = marketData
 
 	at.applyDrawdownPositionControls(decision, "short")
 
@@ -3010,6 +3163,20 @@ func sortDecisionsByPriority(decisions []decision.Decision) []decision.Decision 
 			return 999 // 未知动作放最后
 		}
 	}
+	getStrategyPriority := func(hint string) int {
+		switch strings.ToLower(strings.TrimSpace(hint)) {
+		case "trend", "momentum":
+			return 1
+		case "transitional", "auto":
+			return 2
+		case "range":
+			return 3
+		case "range_developing":
+			return 4
+		default:
+			return 5
+		}
+	}
 
 	// 复制决策列表
 	sorted := make([]decision.Decision, len(decisions))
@@ -3018,8 +3185,18 @@ func sortDecisionsByPriority(decisions []decision.Decision) []decision.Decision 
 	// 按优先级排序
 	for i := 0; i < len(sorted)-1; i++ {
 		for j := i + 1; j < len(sorted); j++ {
+			pi := getActionPriority(sorted[i].Action)
+			pj := getActionPriority(sorted[j].Action)
 			if getActionPriority(sorted[i].Action) > getActionPriority(sorted[j].Action) {
 				sorted[i], sorted[j] = sorted[j], sorted[i]
+				pi, pj = pj, pi
+			}
+			if pi == pj && pi == 2 { // 同为开仓，按策略权重
+				si := getStrategyPriority(sorted[i].StrategyHint)
+				sj := getStrategyPriority(sorted[j].StrategyHint)
+				if si > sj {
+					sorted[i], sorted[j] = sorted[j], sorted[i]
+				}
 			}
 		}
 	}
