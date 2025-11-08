@@ -2713,7 +2713,11 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 
 	minHoldDuration, guardStrategy, guardErr := at.applyOpenGuard(decision, marketData, "long")
 	if guardErr != nil {
-		return guardErr
+		if strings.Contains(guardErr.Error(), "range guard") {
+			log.Printf("  ℹ️ 区间守护提示: %v，按AI方案继续执行", guardErr)
+		} else {
+			return guardErr
+		}
 	}
 	if decision.PositionSizeUSD <= 0 {
 		return fmt.Errorf("守护调整后仓位为0，取消开仓")
@@ -2800,7 +2804,11 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
 
 	minHoldDuration, guardStrategy, guardErr := at.applyOpenGuard(decision, marketData, "short")
 	if guardErr != nil {
-		return guardErr
+		if strings.Contains(guardErr.Error(), "range guard") {
+			log.Printf("  ℹ️ 区间守护提示: %v，按AI方案继续执行", guardErr)
+		} else {
+			return guardErr
+		}
 	}
 	if decision.PositionSizeUSD <= 0 {
 		return fmt.Errorf("守护调整后仓位为0，取消开仓")
