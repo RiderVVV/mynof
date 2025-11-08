@@ -1,0 +1,60 @@
+{
+  "timestamp": "2025-11-08T18:28:01.81704313+08:00",
+  "cycle_number": 140,
+  "input_prompt": "",
+  "cot_trace": "",
+  "decision_json": "",
+  "account_state": {
+    "total_balance": 1364.5908148199999,
+    "available_balance": 991.88444106,
+    "total_unrealized_profit": -5.409185180000122,
+    "position_count": 1,
+    "margin_used_pct": 27.298287805721234
+  },
+  "positions": [
+    {
+      "symbol": "DOGEUSDT",
+      "side": "long",
+      "position_amt": 10332,
+      "entry_price": 0.1801336507936,
+      "mark_price": 0.18027,
+      "unrealized_profit": 1.4087682,
+      "leverage": 5,
+      "liquidation_price": 0.1451404
+    }
+  ],
+  "candidate_coins": [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "BNBUSDT",
+    "XRPUSDT",
+    "DOGEUSDT",
+    "VIRTUALUSDT",
+    "DASHUSDT",
+    "TAOUSDT",
+    "ZENUSDT",
+    "SUIUSDT"
+  ],
+  "decisions": [
+    {
+      "action": "close_long_partial",
+      "symbol": "DOGEUSDT",
+      "quantity": 5682.839440289085,
+      "leverage": 5,
+      "price": 0.18027,
+      "order_id": 86630700435,
+      "timestamp": "2025-11-08T18:27:00.730296791+08:00",
+      "success": true,
+      "error": ""
+    }
+  ],
+  "execution_log": [
+    "✓ 分批止盈: DOGEUSDT long [mid] 目标价0.1803 平仓5682.8394 (≈55.0%)",
+    "⚠ 重新设置止损失败 DOGEUSDT long: 设置止损失败: \u003cAPIError\u003e code=-1111, msg=Precision is over the maximum defined for this asset.",
+    "⚠️ 辅助模型 Google Gemini 2.5 Flash 调用失败: 解析AI响应失败: 提取决策失败: JSON解析失败: invalid character '`' after top-level value\n\n=== AI思维链分析 ===\n{\"decisions\":",
+    "🧠 辅助模型 xAI Grok-4 Fast 建议: hold DOGEUSDT; …总计2条建议"
+  ],
+  "success": false,
+  "error_message": "获取AI决策失败: 调用AI API失败: 读取响应失败: stream error: stream ID 1; INTERNAL_ERROR; received from peer"
+}
