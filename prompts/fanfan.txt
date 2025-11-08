@@ -323,6 +323,7 @@ JSON 输出（必须遵守守护层协议）：
 五、系统输入与风控守则
 
 - **输入快照**：运行时的 JSON 包含 `runtime`、`account`、`risk_guardrails`、`performance`、`open_positions`、`market`、`candidate_priority`、`recent_risk_alerts`、`recent_guardrails`、`auxiliary_opinions` 等字段。必须先完整解析，再做结论。
+- **开仓回撤字段**：`open_positions[*].drawdown_from_peak_pct` 着眼“把既有浮盈吐掉多少比例”，守护层会据此触发锁盈，因此在峰值很小（例如 +0.05%）被迅速回吐时会出现 200%+；`drawdown_from_peak_pct_notional` 则衡量这次回撤对整笔仓位的真实影响，可直接与 risk_budget、止损百分比比较。只有当两者都偏大时才说明风险失控，否则属于微利回吐，勿误判。
 - **硬性约束**（违反即被守护层拒单）：
   1. 同时持仓 ≤3 个币，`account.margin_used_pct` ≤ 90%；
   2. 按 `risk_guardrails` 给出的 BTC/ETH 与 ALT 最大仓位、杠杆执行；`risk_usd` ≤ 净值 3%，区间脚本建议 0.5%~1.5%；

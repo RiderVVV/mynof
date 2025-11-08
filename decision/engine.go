@@ -21,21 +21,22 @@ const MaxMarginUsagePct = 90.0
 
 // PositionInfo 持仓信息
 type PositionInfo struct {
-	Symbol               string  `json:"symbol"`
-	Side                 string  `json:"side"` // "long" or "short"
-	EntryPrice           float64 `json:"entry_price"`
-	MarkPrice            float64 `json:"mark_price"`
-	Quantity             float64 `json:"quantity"`
-	Leverage             int     `json:"leverage"`
-	UnrealizedPnL        float64 `json:"unrealized_pnl"`
-	UnrealizedPnLPct     float64 `json:"unrealized_pnl_pct"`
-	PeakUnrealizedPnLPct float64 `json:"peak_unrealized_pnl_pct,omitempty"`
-	PeakUnrealizedPnLUSD float64 `json:"peak_unrealized_pnl_usd,omitempty"`
-	DrawdownFromPeakPct  float64 `json:"drawdown_from_peak_pct,omitempty"`
-	DrawdownFromPeakUSD  float64 `json:"drawdown_from_peak_usd,omitempty"`
-	LiquidationPrice     float64 `json:"liquidation_price"`
-	MarginUsed           float64 `json:"margin_used"`
-	UpdateTime           int64   `json:"update_time"` // 持仓更新时间戳（毫秒）
+	Symbol                      string  `json:"symbol"`
+	Side                        string  `json:"side"` // "long" or "short"
+	EntryPrice                  float64 `json:"entry_price"`
+	MarkPrice                   float64 `json:"mark_price"`
+	Quantity                    float64 `json:"quantity"`
+	Leverage                    int     `json:"leverage"`
+	UnrealizedPnL               float64 `json:"unrealized_pnl"`
+	UnrealizedPnLPct            float64 `json:"unrealized_pnl_pct"`
+	PeakUnrealizedPnLPct        float64 `json:"peak_unrealized_pnl_pct,omitempty"`
+	PeakUnrealizedPnLUSD        float64 `json:"peak_unrealized_pnl_usd,omitempty"`
+	DrawdownFromPeakPct         float64 `json:"drawdown_from_peak_pct,omitempty"`
+	DrawdownFromPeakUSD         float64 `json:"drawdown_from_peak_usd,omitempty"`
+	DrawdownFromPeakPctNotional float64 `json:"drawdown_from_peak_pct_notional,omitempty"`
+	LiquidationPrice            float64 `json:"liquidation_price"`
+	MarginUsed                  float64 `json:"margin_used"`
+	UpdateTime                  int64   `json:"update_time"` // 持仓更新时间戳（毫秒）
 }
 
 // AccountInfo 账户信息

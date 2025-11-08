@@ -13,6 +13,7 @@
 - `risk_guardrails.max_position_usd / max_leverage`：山寨与主流币仓位、杠杆上限，已经根据净值动态计算。  
 - `risk_guardrails.performance_state`：值为 `drawdown`/`loss_streak` 时需要降频；`sharpe_cooling_level` 表示守护层已经限制新仓。  
 - `open_positions[*]`：`peak_unrealized_pnl_pct/usd` 与 `drawdown_from_peak_pct/usd` 可直接判断浮盈峰值与回撤；`hold_minutes` 实际持仓时间，守护层会约束最小值。  
+- `open_positions[*].drawdown_from_peak_pct_notional`：回撤占当前持仓名义价值的百分比，可直接与 risk_budget、止损百分比对比；与 `drawdown_from_peak_pct`（相对于历史峰值浮盈的回撤比例，用于判断守护层是否触发）结合使用。若仅因峰值很小出现 200%+ 的 `drawdown_from_peak_pct`，但名义化比例仅 0.1%，说明只是把微小利润吐掉；反之两者都偏大时才代表实质性风险。
 - `market[*].confidence_flags`：来自硬指标的资格提示，例如 `range_tradable`、`multi_tf_bearish`。  
 - `market[*].range_state`：区间脚本的关键输入——触碰次数、区间寿命 (`age_bars_1h`)、ADX (`adx14_4h`)、区间宽度与 ATR 的比值 (`width_to_atr14`)。  
 - `auxiliary_opinions`：每个辅助模型的摘要，`votes` 列出它的前几条建议（含 `strategy_hint` / `confidence` / `risk_usd`）；`weight` 和 `role` 表示它在 ensemble 中的作用。  

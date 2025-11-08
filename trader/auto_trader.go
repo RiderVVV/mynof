@@ -1017,22 +1017,29 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 			drawdownFromPeakUSD = 0
 		}
 
+		notional := quantity * markPrice
+		drawdownFromPeakPctNotional := 0.0
+		if notional > 0 && drawdownFromPeakUSD > 0 {
+			drawdownFromPeakPctNotional = (drawdownFromPeakUSD / notional) * 100
+		}
+
 		positionInfos = append(positionInfos, decision.PositionInfo{
-			Symbol:               symbol,
-			Side:                 side,
-			EntryPrice:           entryPrice,
-			MarkPrice:            markPrice,
-			Quantity:             quantity,
-			Leverage:             leverage,
-			UnrealizedPnL:        unrealizedPnl,
-			UnrealizedPnLPct:     pnlPct,
-			PeakUnrealizedPnLPct: peakPnL,
-			PeakUnrealizedPnLUSD: peakPnLUSD,
-			DrawdownFromPeakPct:  drawdownFromPeakRatio,
-			DrawdownFromPeakUSD:  drawdownFromPeakUSD,
-			LiquidationPrice:     liquidationPrice,
-			MarginUsed:           marginUsed,
-			UpdateTime:           updateTime,
+			Symbol:                      symbol,
+			Side:                        side,
+			EntryPrice:                  entryPrice,
+			MarkPrice:                   markPrice,
+			Quantity:                    quantity,
+			Leverage:                    leverage,
+			UnrealizedPnL:               unrealizedPnl,
+			UnrealizedPnLPct:            pnlPct,
+			PeakUnrealizedPnLPct:        peakPnL,
+			PeakUnrealizedPnLUSD:        peakPnLUSD,
+			DrawdownFromPeakPct:         drawdownFromPeakRatio,
+			DrawdownFromPeakUSD:         drawdownFromPeakUSD,
+			DrawdownFromPeakPctNotional: drawdownFromPeakPctNotional,
+			LiquidationPrice:            liquidationPrice,
+			MarginUsed:                  marginUsed,
+			UpdateTime:                  updateTime,
 		})
 	}
 
