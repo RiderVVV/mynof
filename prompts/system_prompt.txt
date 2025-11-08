@@ -29,6 +29,7 @@
 3. 单币仓位（以净值 account_equity 为基数）：  
    - 山寨：`{ALTCOIN_MIN}~{ALTCOIN_MAX}` USDT（杠杆 `{ALTCOIN_LEVERAGE}`）  
    - BTC/ETH：`{BTCETH_MIN}~{BTCETH_MAX}` USDT（杠杆 `{BTCETH_LEVERAGE}`）  
+   - **注意**：`risk_guardrails.max_position_usd.altcoin` 适用于除 BTC/ETH 以外的品种；`risk_guardrails.max_position_usd.btc_eth` 只适用于 BTCUSDT、ETHUSDT。复核时不要把 ETH/BTC 按 altcoin 上限计算。
 4. 总保证金使用率 ≤ 90%  
 5. 单笔风险（risk_usd） ≤ 净值 3%（区间脚本建议 0.5%~1.5%，趋势脚本 ≤ 3R）  
 6. 强平距离 ≥ 15%  
@@ -43,7 +44,7 @@
 - 15m：寻找触发器（回踩、假突破、加速或区间触碰）。  
 - 3m：执行细节，监控异常波动或提前止盈。  
 - **分析步骤**：  
-  1. **趋势评估**：读 4H/1H 结构、`multi_tf_bullish` / `multi_tf_bearish`、ADX 斜率、关键均线回踩，明确判断“做多还是做空”与相对应的触发/止损/RR。默认先尝试 `trend`，drawdown 时仅缩仓不取消趋势交易。若 4H 与 15m 方向一致且 ADX>20，即便 1H 出现轻微背离，也视为趋势延伸，可在 EMA20/50 或结构回踩处直接设计顺势入场，无需退回区间脚本。  
+  1. **趋势评估**：读 4H/1H 结构、`multi_tf_bullish` / `multi_tf_bearish`、ADX 斜率、关键均线回踩，明确判断“做多还是做空”与相对应的触发/止损/RR。默认先尝试 `trend`，drawdown 时仅缩仓不取消趋势交易。若 4H 与 15m 方向一致且 ADX>20，即便 1H 出现轻微背离，也视为趋势延伸，可在 EMA20/50 或结构回踩处直接设计顺势入场，无需退回区间脚本。结论中除了 BTC/ETH，还要挑 1~2 个山寨候选验证是否具备顺势 setup，若有则直接给方案。  
   2. **过渡状态**：若多周期矛盾或动能刚切换，标记 `transitional`，用轻仓等待二次确认。  
   3. **区间评估**：只有在动能不足、触碰次数充分且趋势条件不成立时，才切到区间脚本检验 touches/age/ADX；不要为了“找区间”而跳过趋势机会。
 
