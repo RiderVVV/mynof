@@ -1,0 +1,69 @@
+{
+  "timestamp": "2025-11-08T03:09:04.961854658+08:00",
+  "cycle_number": 11,
+  "input_prompt": "guard_cycle",
+  "cot_trace": "",
+  "decision_json": "[]",
+  "account_state": {
+    "total_balance": 1384.42290012,
+    "available_balance": 576.28077355,
+    "total_unrealized_profit": 3.4229001199998947,
+    "position_count": 2,
+    "margin_used_pct": 58.173572485812805
+  },
+  "positions": [
+    {
+      "symbol": "VIRTUALUSDT",
+      "side": "short",
+      "position_amt": 315.3,
+      "entry_price": 1.443513510942,
+      "mark_price": 1.44329591,
+      "unrealized_profit": 0.06860928,
+      "leverage": 2,
+      "liquidation_price": 2.14508416
+    },
+    {
+      "symbol": "DOGEUSDT",
+      "side": "short",
+      "position_amt": 3235,
+      "entry_price": 0.17901,
+      "mark_price": 0.17861906,
+      "unrealized_profit": 1.2646909,
+      "leverage": 1,
+      "liquidation_price": 0.35562891
+    }
+  ],
+  "candidate_coins": [
+    "DOGEUSDT",
+    "ZENUSDT",
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "BNBUSDT",
+    "VIRTUALUSDT",
+    "TAOUSDT",
+    "DASHUSDT",
+    "SUIUSDT",
+    "XRPUSDT"
+  ],
+  "decisions": [
+    {
+      "action": "close_short",
+      "symbol": "VIRTUALUSDT",
+      "quantity": 315.3,
+      "leverage": 2,
+      "price": 1.44329591,
+      "order_id": 5473833217,
+      "timestamp": "2025-11-08T03:09:04.520811007+08:00",
+      "success": true,
+      "error": ""
+    }
+  ],
+  "execution_log": [
+    "⚡️ 简易回撤守护触发: VIRTUALUSDT short 峰值0.57% → 当前0.03% (回撤比例 95% ≥ 20%)",
+    "✓ 简易回撤守护平仓: VIRTUALUSDT short 锁定利润0.03% (峰值0.57%)",
+    "🛡 盈利回撤保护：触发1个持仓，成功1个，失败0个"
+  ],
+  "success": true,
+  "error_message": ""
+}
