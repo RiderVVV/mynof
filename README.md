@@ -611,6 +611,7 @@ For running multiple AI traders competing against each other:
 | `name` | Display name | `"My AI Trader"` | ✅ Yes |
 | `enabled` | Whether this trader is enabled<br>Set to `false` to skip startup | `true` or `false` | ✅ Yes |
 | `ai_model` | AI provider to use | `"deepseek"` or `"qwen"` or `"custom"` | ✅ Yes |
+| `prompt_path` | Optional system prompt template path<br>Relative paths resolve from repo root; bare filenames look in `prompts/` | `"prompts/币圈林凡.txt"` | ❌ No |
 | `exchange` | Exchange to use | `"binance"` or `"hyperliquid"` or `"aster"` | ✅ Yes |
 | `binance_api_key` | Binance API key | `"abc123..."` | Required when using Binance |
 | `binance_secret_key` | Binance Secret key | `"xyz789..."` | Required when using Binance |
@@ -632,6 +633,8 @@ For running multiple AI traders competing against each other:
 
 **Default Trading Coins** (when `use_default_coins: true`):
 - BTC, ETH, SOL, BNB, XRP, DOGE, ADA, HYPE
+
+**Custom prompt template:** set `prompt_path` to any `.txt` file (e.g. `prompts/币圈林凡.txt`) to override the default system prompt. Relative paths are resolved from the repo root and we fall back to the built-in prompt if the file is missing.
 
 ---
 

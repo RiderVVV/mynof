@@ -80,6 +80,7 @@ type Context struct {
 	Performance      interface{}              `json:"-"` // 历史表现分析（logger.PerformanceAnalysis）
 	BTCETHLeverage   int                      `json:"-"` // BTC/ETH杠杆倍数（从配置读取）
 	AltcoinLeverage  int                      `json:"-"` // 山寨币杠杆倍数（从配置读取）
+	SystemPromptPath string                   `json:"-"` // 自定义系统提示词路径
 	AuxOpinions      []AuxOpinion             `json:"-"` // 辅助模型意见
 	AuxConsensus     *AuxConsensus            `json:"-"` // 辅助模型共识
 	EnsembleMode     string                   `json:"-"`
@@ -285,7 +286,7 @@ func GetFullDecision(ctx *Context, mcpClient *mcp.Client) (*FullDecision, error)
 	}
 
 	// 2. 构建 System Prompt（固定规则）和 User Prompt（动态数据）
-	systemPrompt := buildSystemPrompt(ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
+	systemPrompt := buildSystemPrompt(ctx.SystemPromptPath, ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
 	userPrompt := buildUserPrompt(ctx)
 
 	// 3. 调用AI API（使用 system + user prompt）
@@ -423,12 +424,29 @@ func calculateMaxCandidates(ctx *Context) int {
 }
 
 // buildSystemPrompt 构建 System Prompt（从模板读取，失败时回退）
-func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage int) string {
-	promptPath := filepath.Join("prompts", "system_prompt.txt")
+func buildSystemPrompt(customPromptPath string, accountEquity float64, btcEthLeverage, altcoinLeverage int) string {
+	defaultPromptPath := filepath.Join("prompts", "system_prompt.txt")
+	promptPath := strings.TrimSpace(customPromptPath)
+	if promptPath == "" {
+		promptPath = defaultPromptPath
+	} else {
+		promptPath = filepath.Clean(promptPath)
+		if !filepath.IsAbs(promptPath) && !strings.ContainsRune(promptPath, os.PathSeparator) {
+			// 若仅提供文件名，则默认使用 prompts 目录
+			promptPath = filepath.Join("prompts", promptPath)
+		}
+	}
+
 	templateBytes, err := os.ReadFile(promptPath)
 	if err != nil {
-		log.Printf("⚠️  无法读取系统提示词文件 %s: %v，使用内置提示词", promptPath, err)
-		return buildDefaultSystemPrompt(accountEquity, btcEthLeverage, altcoinLeverage)
+		if promptPath != defaultPromptPath {
+			log.Printf("⚠️  无法读取自定义系统提示词文件 %s: %v，回退默认模板", promptPath, err)
+			templateBytes, err = os.ReadFile(defaultPromptPath)
+		}
+		if err != nil {
+			log.Printf("⚠️  无法读取系统提示词文件 %s: %v，使用内置提示词", defaultPromptPath, err)
+			return buildDefaultSystemPrompt(accountEquity, btcEthLeverage, altcoinLeverage)
+		}
 	}
 
 	template := string(templateBytes)

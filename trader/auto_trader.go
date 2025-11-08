@@ -23,9 +23,10 @@ const (
 // AutoTraderConfig 自动交易配置（简化版 - AI全权决策）
 type AutoTraderConfig struct {
 	// Trader标识
-	ID      string // Trader唯一标识（用于日志目录等）
-	Name    string // Trader显示名称
-	AIModel string // AI模型: "qwen" 或 "deepseek"
+	ID               string // Trader唯一标识（用于日志目录等）
+	Name             string // Trader显示名称
+	AIModel          string // AI模型: "qwen" 或 "deepseek"
+	SystemPromptPath string // 自定义系统提示词路径（可选，默认prompts/system_prompt.txt）
 
 	// 交易平台选择
 	Exchange string // "binance", "hyperliquid" 或 "aster"
@@ -1145,11 +1146,12 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 
 	// 6. 构建上下文
 	ctx := &decision.Context{
-		CurrentTime:     time.Now().Format("2006-01-02 15:04:05"),
-		RuntimeMinutes:  int(time.Since(at.startTime).Minutes()),
-		CallCount:       at.callCount,
-		BTCETHLeverage:  at.config.BTCETHLeverage,  // 使用配置的杠杆倍数
-		AltcoinLeverage: at.config.AltcoinLeverage, // 使用配置的杠杆倍数
+		CurrentTime:      time.Now().Format("2006-01-02 15:04:05"),
+		RuntimeMinutes:   int(time.Since(at.startTime).Minutes()),
+		CallCount:        at.callCount,
+		BTCETHLeverage:   at.config.BTCETHLeverage,  // 使用配置的杠杆倍数
+		AltcoinLeverage:  at.config.AltcoinLeverage, // 使用配置的杠杆倍数
+		SystemPromptPath: at.config.SystemPromptPath,
 		Account: decision.AccountInfo{
 			TotalEquity:      totalEquity,
 			AvailableBalance: availableBalance,

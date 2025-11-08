@@ -32,10 +32,11 @@ type EnsembleConfig struct {
 
 // TraderConfig 单个trader的配置
 type TraderConfig struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Enabled bool   `json:"enabled"`  // 是否启用该trader
-	AIModel string `json:"ai_model"` // "qwen" or "deepseek"
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Enabled    bool   `json:"enabled"`               // 是否启用该trader
+	AIModel    string `json:"ai_model"`              // "qwen" or "deepseek"
+	PromptPath string `json:"prompt_path,omitempty"` // 自定义系统提示词路径（默认prompts/system_prompt.txt）
 
 	// 交易平台选择（二选一）
 	Exchange string `json:"exchange"` // "binance" or "hyperliquid"
