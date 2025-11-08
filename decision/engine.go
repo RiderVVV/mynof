@@ -295,7 +295,7 @@ func GetFullDecision(ctx *Context, mcpClient *mcp.Client) (*FullDecision, error)
 	}
 
 	// 4. 解析AI响应
-	decision, err := parseFullDecisionResponse(aiResponse, ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
+	decision, err := parseFullDecisionResponse(aiResponse, ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage, ctx.MarketDataMap)
 	if err != nil {
 		return nil, fmt.Errorf("解析AI响应失败: %w", err)
 	}
@@ -322,7 +322,7 @@ func ReviewDecisions(ctx *Context, baseDecision *FullDecision, flags []RiskFlag,
 		return nil, fmt.Errorf("调用风控复核AI失败: %w", err)
 	}
 
-	reviewedDecision, err := parseFullDecisionResponse(aiResponse, ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
+	reviewedDecision, err := parseFullDecisionResponse(aiResponse, ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage, ctx.MarketDataMap)
 	if err != nil {
 		return nil, fmt.Errorf("解析风控复核响应失败: %w", err)
 	}
@@ -1630,7 +1630,7 @@ func minInt(a, b int) int {
 }
 
 // parseFullDecisionResponse 解析AI的完整决策响应
-func parseFullDecisionResponse(aiResponse string, accountEquity float64, btcEthLeverage, altcoinLeverage int) (*FullDecision, error) {
+func parseFullDecisionResponse(aiResponse string, accountEquity float64, btcEthLeverage, altcoinLeverage int, marketData map[string]*market.Data) (*FullDecision, error) {
 	// 1. 提取思维链
 	cotTrace := extractCoTTrace(aiResponse)
 
@@ -1643,7 +1643,10 @@ func parseFullDecisionResponse(aiResponse string, accountEquity float64, btcEthL
 		}, fmt.Errorf("提取决策失败: %w\n\n=== AI思维链分析 ===\n%s", err, cotTrace)
 	}
 
-	// 3. 验证决策
+	// 3. 根据市场数据自动补全必要的字段（例如 range 策略默认的分批止盈）
+	autoFillRangeTakeProfitTargets(decisions, marketData)
+
+	// 4. 验证决策
 	if err := validateDecisions(decisions, accountEquity, btcEthLeverage, altcoinLeverage); err != nil {
 		return &FullDecision{
 			CoTTrace:  cotTrace,
@@ -1845,6 +1848,137 @@ func findMatchingBracket(s string, start int) int {
 	}
 
 	return -1
+}
+
+const (
+	autoRangeMidFraction   = 0.55
+	autoRangeFinalFallback = 0.35
+)
+
+func autoFillRangeTakeProfitTargets(decisions []Decision, marketData map[string]*market.Data) {
+	for i := range decisions {
+		d := &decisions[i]
+		if d == nil || len(d.TakeProfitTargets) > 0 || !isDecisionOpenAction(d.Action) {
+			continue
+		}
+		if d.TakeProfit <= 0 {
+			continue
+		}
+
+		strategyHint, ok := normalizeStrategyHint(d.StrategyHint)
+		if !ok {
+			continue
+		}
+		if strategyHint != "range" && strategyHint != "range_developing" {
+			continue
+		}
+
+		targets := buildAutoRangeTargets(d, marketData)
+		if len(targets) > 0 {
+			d.TakeProfitTargets = targets
+		}
+	}
+}
+
+func buildAutoRangeTargets(decision *Decision, marketData map[string]*market.Data) []TakeProfitTarget {
+	if decision == nil || decision.TakeProfit <= 0 {
+		return nil
+	}
+
+	mid := estimateRangeMidPrice(decision.Symbol, marketData)
+	var targets []TakeProfitTarget
+
+	if mid > 0 {
+		switch decision.Action {
+		case "open_long":
+			if mid < decision.TakeProfit {
+				targets = append(targets, TakeProfitTarget{
+					Price:   mid,
+					SizePct: autoRangeMidFraction,
+					Kind:    "mid_auto",
+				})
+			}
+		case "open_short":
+			if mid > decision.TakeProfit {
+				targets = append(targets, TakeProfitTarget{
+					Price:   mid,
+					SizePct: autoRangeMidFraction,
+					Kind:    "mid_auto",
+				})
+			}
+		}
+	}
+
+	finalFraction := 1.0
+	for _, t := range targets {
+		finalFraction -= t.SizePct
+	}
+	if len(targets) > 0 {
+		finalFraction = math.Max(autoRangeFinalFallback, finalFraction)
+	}
+	if finalFraction <= 0 || finalFraction > 1.0 {
+		finalFraction = 1.0
+	}
+
+	targets = append(targets, TakeProfitTarget{
+		Price:   decision.TakeProfit,
+		SizePct: finalFraction,
+		Kind:    "final_auto",
+	})
+
+	total := 0.0
+	for _, t := range targets {
+		total += t.SizePct
+	}
+	if total > 1.0 {
+		scale := 1.0 / total
+		for i := range targets {
+			targets[i].SizePct *= scale
+		}
+	}
+
+	return targets
+}
+
+func estimateRangeMidPrice(symbol string, marketData map[string]*market.Data) float64 {
+	data := lookupMarketData(marketData, symbol)
+	if data == nil || data.RangeState == nil {
+		return 0
+	}
+
+	rs := data.RangeState
+	mid := rs.Mid
+	if mid <= 0 {
+		if rs.VWAP > 0 {
+			mid = rs.VWAP
+		} else if rs.High > 0 && rs.Low > 0 {
+			mid = (rs.High + rs.Low) / 2
+		}
+	}
+	return mid
+}
+
+func lookupMarketData(marketData map[string]*market.Data, symbol string) *market.Data {
+	if marketData == nil {
+		return nil
+	}
+	sym := strings.TrimSpace(symbol)
+	if sym == "" {
+		return nil
+	}
+
+	candidates := []string{sym, strings.ToUpper(sym), strings.ToLower(sym)}
+	seen := make(map[string]bool, len(candidates))
+	for _, key := range candidates {
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		if data := marketData[key]; data != nil {
+			return data
+		}
+	}
+	return nil
 }
 
 func normalizeStrategyHint(input string) (string, bool) {
