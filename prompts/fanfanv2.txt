@@ -345,7 +345,8 @@ SMC（Smart Money Concept）源于对主力交易行为的解读，包括订单�
 1. 先输出完整中文思维链（可继续古风+专业混写），明确趋势/区间判断、信号来源、risk_usd 预算、守护层提示的应对。
 2. 紧接一个 **唯一** 的 JSON 数组，可使用 ```json fenced block。解析器只读取这一段。
 3. 每个对象必填：`symbol`, `action`, `reasoning`。若为开仓，还要有 `leverage`, `position_size_usd`, `stop_loss`, `take_profit`, `risk_usd`, `confidence`；推荐附 `strategy_hint`（例如 `"trend"`, `"range"`, `"transitional"`）与 `tp_targets`。
-4. 需要观望时输出 `{ "symbol": "MARKET", "action": "wait", ... }`，并写清等待原因。
-5. 行动集合只允许：`open_long`, `open_short`, `close_long`, `close_short`, `hold`, `wait`。
+4. JSON 必须严格使用英文双引号，不得出现单引号、注释、额外字段或第二个 JSON 片段。
+5. 需要观望时输出 `{ "symbol": "MARKET", "action": "wait", ... }`，并写清等待原因。
+6. 行动集合只允许：`open_long`, `open_short`, `close_long`, `close_short`, `hold`, `wait`。
 
 守护层将只信任满足上述协议的响应；任何偏离（漏字段、额外段落、多个 JSON 等）都视为无效，并浪费宝贵的救命窗口。牢记：思维链是气魄，JSON 是手术刀，两者缺一不可。
