@@ -2012,6 +2012,8 @@ func normalizeStrategyHint(input string) (string, bool) {
 		return "", true
 	case "trend", "trending":
 		return "trend", true
+	case "range_break", "range_breakout", "range_breakdown":
+		return "trend", true
 	case "range", "ranging", "range_trade":
 		return "range", true
 	case "range_developing", "range_develop", "range_dev", "developing_range":

@@ -128,6 +128,7 @@ A Binance-compatible decentralized perpetual futures exchange!
 - **Risk-Reward Ratio**: Mandatory ≥1:2 (stop-loss:take-profit)
 - **Prevent Position Stacking**: No duplicate opening of same coin/direction
 - **Simple Trailing Guard (NEW)**: After a trade covers fees (≥0.06% by default) and reaches ≥0.5% peak PnL, a 20% drawdown locks profit; leave it on by default or disable via `simple_trailing_guard_enabled`, tune frequency via `guard_interval_minutes`, and override the fee gate with `simple_trailing_fee_pct`.
+- **Risk Review Toggle**: The AI risk-review pass is off by default; set `risk_review_enabled` to `true` per trader when you want the second-layer guardrail, or omit/leave `false` to inspect raw decisions.
 
 ### 🎨 Professional UI
 - **Professional Trading Interface**: Binance-style visual design

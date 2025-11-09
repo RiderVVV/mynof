@@ -15,7 +15,9 @@
       "scan_interval_minutes": 3,
       "guard_interval_minutes": 1,
       "simple_trailing_guard_enabled": true,
-      "simple_trailing_fee_pct": 0.03
+      "simple_trailing_fee_pct": 0.03,
+      // 可选：AI风控复核（默认false，设为true启用二次复核）
+      "risk_review_enabled": false
     },
     {
       "id": "binance_qwen",

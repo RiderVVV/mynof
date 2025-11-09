@@ -81,6 +81,7 @@ type AutoTraderConfig struct {
 
 	SimpleTrailingGuardEnabled bool    // 是否启用简单回撤守护
 	SimpleTrailingFeePct       float64 // 回本所需收益阈值（默认0.03%即万五*2）
+	RiskReviewEnabled          bool    // 是否启用AI风控复核
 }
 
 // EnsembleModelConfig 定义辅助模型的API参数
@@ -637,7 +638,13 @@ func (at *AutoTrader) runCycle() error {
 	// 风控复核：检测高风险操作
 	riskFlags := at.generateRiskFlags(ctx, fullDecision.Decisions)
 	if len(riskFlags) > 0 {
-		log.Printf("🛡 检测到 %d 条风险告警，启动风控复核流程...", len(riskFlags))
+		var statusMsg string
+		if at.config.RiskReviewEnabled {
+			statusMsg = fmt.Sprintf("🛡 检测到 %d 条风险告警，启动风控复核流程...", len(riskFlags))
+		} else {
+			statusMsg = fmt.Sprintf("🛡 检测到 %d 条风险告警，但风控复核开关已关闭，保留原始决策", len(riskFlags))
+		}
+		log.Println(statusMsg)
 		for _, flag := range riskFlags {
 			log.Printf("    - [%s %s] %s (%s) <%s>", flag.Symbol, flag.Action, flag.Issue, flag.Detail, flag.Severity)
 			record.RiskFlags = append(record.RiskFlags, logger.RiskEvent{
@@ -648,15 +655,19 @@ func (at *AutoTrader) runCycle() error {
 				Detail:   flag.Detail,
 			})
 		}
-		record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("🛡 风控复核触发：%d 条告警", len(riskFlags)))
 
-		reviewedDecision, reviewErr := decision.ReviewDecisions(ctx, fullDecision, riskFlags, at.mcpClient)
-		if reviewErr != nil {
-			log.Printf("⚠ 风控复核失败，保留原始决策: %v", reviewErr)
-			record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("⚠ 风控复核失败: %v", reviewErr))
+		if at.config.RiskReviewEnabled {
+			record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("🛡 风控复核触发：%d 条告警", len(riskFlags)))
+			reviewedDecision, reviewErr := decision.ReviewDecisions(ctx, fullDecision, riskFlags, at.mcpClient)
+			if reviewErr != nil {
+				log.Printf("⚠ 风控复核失败，保留原始决策: %v", reviewErr)
+				record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("⚠ 风控复核失败: %v", reviewErr))
+			} else {
+				fullDecision = reviewedDecision
+				record.ExecutionLog = append(record.ExecutionLog, "🛡 风控复核完成，决策已根据风险告警更新")
+			}
 		} else {
-			fullDecision = reviewedDecision
-			record.ExecutionLog = append(record.ExecutionLog, "🛡 风控复核完成，决策已根据风险告警更新")
+			record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("🛡 风控复核已关闭：保留原始决策（%d 条告警）", len(riskFlags)))
 		}
 	}
 
@@ -1277,6 +1288,8 @@ func normaliseStrategyHint(hint, regime string) string {
 		return defaultStrategyFromRegime(regime)
 	case "trend", "range":
 		return h
+	case "range_break", "range_breakout", "range_breakdown":
+		return "trend"
 	case "transitional", "neutral", "balancing":
 		return "transitional"
 	case "mean_reversion":

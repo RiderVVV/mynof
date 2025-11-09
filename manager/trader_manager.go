@@ -73,6 +73,9 @@ func (tm *TraderManager) AddTrader(cfg config.TraderConfig, coinPoolURL string, 
 	if cfg.SimpleTrailingFeePct > 0 {
 		traderConfig.SimpleTrailingFeePct = cfg.SimpleTrailingFeePct
 	}
+	if cfg.RiskReviewEnabled != nil {
+		traderConfig.RiskReviewEnabled = *cfg.RiskReviewEnabled
+	}
 
 	if len(cfg.Ensemble.Models) > 0 {
 		traderConfig.EnsembleMode = cfg.Ensemble.Mode
