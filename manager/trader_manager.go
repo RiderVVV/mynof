@@ -63,6 +63,11 @@ func (tm *TraderManager) AddTrader(cfg config.TraderConfig, coinPoolURL string, 
 		MaxDailyLoss:          maxDailyLoss,
 		MaxDrawdown:           maxDrawdown,
 		StopTradingTime:       time.Duration(stopTradingMinutes) * time.Minute,
+		FocusSymbols:          cfg.FocusSymbols,
+		MaxTradeRiskUSD:       cfg.MaxTradeRiskUSD,
+		TradingWindow:         cfg.TradingWindow,
+		MajorEvents:           cfg.MajorEvents,
+		GuardrailStrict:       cfg.GuardrailStrict,
 	}
 
 	if cfg.SimpleTrailingGuardEnabled != nil {
