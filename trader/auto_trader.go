@@ -27,8 +27,8 @@ const (
 	minStopDistancePct       = 0.0   // 止损距离下限（0 = 不限制）
 	maxSnapshotDriftPct      = 0.2   // 决策生成到执行的最大允许价格偏移(%)
 	defaultMinRewardToRisk   = 2.0   // 默认最小盈亏比
-	coolingMinRewardToRisk   = 3.0   // 冷却阶段最小盈亏比
-	coolingConfidenceMinimum = 80    // 冷却阶段最小信心
+	coolingMinRewardToRisk   = 2.0   // 冷却阶段最小盈亏比
+	coolingConfidenceMinimum = 75    // 冷却阶段最小信心
 )
 
 // AutoTraderConfig 自动交易配置（简化版 - AI全权决策）
@@ -1443,11 +1443,14 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 			MarginUsedPct:    marginUsedPct,
 			PositionCount:    len(positionInfos),
 		},
-		Positions:        positionInfos,
-		CandidateCoins:   candidateCoins,
-		Performance:      performance, // 添加历史表现分析
-		RecentRiskAlerts: recentRiskAlerts,
-		RecentGuardrails: recentGuardrails,
+		Positions:         positionInfos,
+		CandidateCoins:    candidateCoins,
+		Performance:       performance, // 添加历史表现分析
+		RecentRiskAlerts:  recentRiskAlerts,
+		RecentGuardrails:  recentGuardrails,
+		EntryMode:         at.entryMode,
+		EntryWorkingType:  at.entryWorkingType,
+		EntryPriceProtect: at.entryPriceProtect,
 	}
 	ctx.PendingEntries = at.collectPendingEntriesForContext()
 
@@ -3346,13 +3349,13 @@ func (at *AutoTrader) generateRiskFlags(ctx *decision.Context, decisions []decis
 			})
 		}
 
-		if d.Confidence > 0 && d.Confidence < 75 {
+		if d.Confidence > 0 && d.Confidence < 70 {
 			flags = appendRiskFlagOnce(flags, decision.RiskFlag{
 				Symbol:   d.Symbol,
 				Action:   d.Action,
 				Issue:    "confidence_too_low",
 				Severity: "medium",
-				Detail:   fmt.Sprintf("confidence %d < 75", d.Confidence),
+				Detail:   fmt.Sprintf("confidence %d < 70", d.Confidence),
 			})
 		}
 

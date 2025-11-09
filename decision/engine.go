@@ -86,27 +86,30 @@ type OITopData struct {
 
 // Context 交易上下文（传递给AI的完整信息）
 type Context struct {
-	CurrentTime      string                   `json:"current_time"`
-	RuntimeMinutes   int                      `json:"runtime_minutes"`
-	CallCount        int                      `json:"call_count"`
-	Account          AccountInfo              `json:"account"`
-	PerformanceState string                   `json:"-"` // derived risk state (drawdown/loss_streak/positive)
-	SharpeCooling    string                   `json:"-"` // derived cooling level (only_high_confidence_trades/halt_xx)
-	Positions        []PositionInfo           `json:"positions"`
-	CandidateCoins   []CandidateCoin          `json:"candidate_coins"`
-	MarketDataMap    map[string]*market.Data  `json:"-"` // 不序列化，但内部使用
-	OITopDataMap     map[string]*OITopData    `json:"-"` // OI Top数据映射
-	Performance      interface{}              `json:"-"` // 历史表现分析（logger.PerformanceAnalysis）
-	BTCETHLeverage   int                      `json:"-"` // BTC/ETH杠杆倍数（从配置读取）
-	AltcoinLeverage  int                      `json:"-"` // 山寨币杠杆倍数（从配置读取）
-	SystemPromptPath string                   `json:"-"` // 自定义系统提示词路径
-	AuxOpinions      []AuxOpinion             `json:"-"` // 辅助模型意见
-	AuxConsensus     *AuxConsensus            `json:"-"` // 辅助模型共识
-	EnsembleMode     string                   `json:"-"`
-	EnsembleSummary  string                   `json:"-"`
-	RecentRiskAlerts []RiskFlag               `json:"-"`
-	RecentGuardrails []MarketGuardrailWarning `json:"-"`
-	PendingEntries   []PendingEntry           `json:"pending_entries,omitempty"`
+	CurrentTime       string                   `json:"current_time"`
+	RuntimeMinutes    int                      `json:"runtime_minutes"`
+	CallCount         int                      `json:"call_count"`
+	Account           AccountInfo              `json:"account"`
+	PerformanceState  string                   `json:"-"` // derived risk state (drawdown/loss_streak/positive)
+	SharpeCooling     string                   `json:"-"` // derived cooling level (only_high_confidence_trades/halt_xx)
+	Positions         []PositionInfo           `json:"positions"`
+	CandidateCoins    []CandidateCoin          `json:"candidate_coins"`
+	MarketDataMap     map[string]*market.Data  `json:"-"` // 不序列化，但内部使用
+	OITopDataMap      map[string]*OITopData    `json:"-"` // OI Top数据映射
+	Performance       interface{}              `json:"-"` // 历史表现分析（logger.PerformanceAnalysis）
+	BTCETHLeverage    int                      `json:"-"` // BTC/ETH杠杆倍数（从配置读取）
+	AltcoinLeverage   int                      `json:"-"` // 山寨币杠杆倍数（从配置读取）
+	SystemPromptPath  string                   `json:"-"` // 自定义系统提示词路径
+	AuxOpinions       []AuxOpinion             `json:"-"` // 辅助模型意见
+	AuxConsensus      *AuxConsensus            `json:"-"` // 辅助模型共识
+	EnsembleMode      string                   `json:"-"`
+	EnsembleSummary   string                   `json:"-"`
+	RecentRiskAlerts  []RiskFlag               `json:"-"`
+	RecentGuardrails  []MarketGuardrailWarning `json:"-"`
+	PendingEntries    []PendingEntry           `json:"pending_entries,omitempty"`
+	EntryMode         string                   `json:"entry_mode"`
+	EntryWorkingType  string                   `json:"entry_working_type"`
+	EntryPriceProtect bool                     `json:"entry_price_protect"`
 }
 
 // AuxConsensus 描述辅助模型之间的总体意见
@@ -595,7 +598,7 @@ func buildDefaultSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeve
 	sb.WriteString("- 自由运用序列数据，你可以做但不限于趋势分析、形态识别、支撑阻力、技术阻力位、斐波那契、波动带计算\n")
 	sb.WriteString("- 多维度交叉验证（价格+量+OI+指标+序列形态）\n")
 	sb.WriteString("- 用你认为最有效的方法发现高确定性机会\n")
-	sb.WriteString("- 综合信心度 ≥ 75 才开仓\n\n")
+	sb.WriteString("- 综合信心度 ≥ 70 才开仓\n\n")
 	sb.WriteString("**避免低质量信号**：\n")
 	sb.WriteString("- 单一维度（只看一个指标）\n")
 	sb.WriteString("- 相互矛盾（涨但量萎缩）\n")
@@ -610,10 +613,10 @@ func buildDefaultSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeve
 	sb.WriteString("  → 🔍 深度反思：\n")
 	sb.WriteString("     • 交易频率过高？（每小时>2次就是过度）\n")
 	sb.WriteString("     • 持仓时间过短？（<30分钟就是过早平仓）\n")
-	sb.WriteString("     • 信号强度不足？（信心度<75）\n")
+	sb.WriteString("     • 信号强度不足？（信心度<70）\n")
 	sb.WriteString("     • 是否在做空？（单边做多是错误的）\n\n")
 	sb.WriteString("**夏普比率 -0.5 ~ 0** (轻微亏损):\n")
-	sb.WriteString("  → ⚠️ 严格控制：只做信心度>80的交易\n")
+	sb.WriteString("  → ⚠️ 严格控制：只做信心度>75的交易\n")
 	sb.WriteString("  → 减少交易频率：每小时最多1笔新开仓\n")
 	sb.WriteString("  → 耐心持仓：至少持有30分钟以上\n\n")
 	sb.WriteString("**夏普比率 0 ~ 0.7** (正收益):\n")
@@ -640,7 +643,7 @@ func buildDefaultSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeve
 	sb.WriteString("]\n```\n\n")
 	sb.WriteString("**字段说明**:\n")
 	sb.WriteString("- `action`: open_long | open_short | close_long | close_short | hold | wait\n")
-	sb.WriteString("- `confidence`: 0-100（开仓建议≥75）\n")
+	sb.WriteString("- `confidence`: 0-100（开仓建议≥70）\n")
 	sb.WriteString("- 开仓时必填: leverage, position_size_usd, stop_loss, take_profit, confidence, risk_usd, reasoning\n\n")
 
 	// === 关键提醒 ===
@@ -896,6 +899,9 @@ type promptSnapshot struct {
 	AuxConsensus      *promptAuxConsensus      `json:"auxiliary_consensus,omitempty"`
 	EnsembleMeta      *promptEnsembleMeta      `json:"ensemble_meta,omitempty"`
 	PendingEntries    []PendingEntry           `json:"pending_entries,omitempty"`
+	EntryMode         string                   `json:"entry_mode"`
+	EntryWorkingType  string                   `json:"entry_working_type"`
+	EntryPriceProtect bool                     `json:"entry_price_protect"`
 }
 
 func buildPromptSnapshot(ctx *Context) promptSnapshot {
@@ -1026,6 +1032,9 @@ func buildPromptSnapshot(ctx *Context) promptSnapshot {
 		AuxConsensus:      buildAuxConsensusSnapshot(ctx),
 		EnsembleMeta:      ensembleMeta,
 		PendingEntries:    ctx.PendingEntries,
+		EntryMode:         ctx.EntryMode,
+		EntryWorkingType:  ctx.EntryWorkingType,
+		EntryPriceProtect: ctx.EntryPriceProtect,
 	}
 }
 

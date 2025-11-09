@@ -45,6 +45,10 @@
       "profit_guard_anchor_pct": 0.01,           // 盈利锚点：峰值达到净值1%才启用锁盈
       "profit_guard_retain_ratio": 0.6,          // 至少保留峰值利润的60%
       "profit_guard_min_retain_usd": 10          // 但无论如何至少锁定 10 USDT
+            "entry_price_protect": true,
+            "profit_guard_anchor_pct": 0.01,
+            "profit_guard_retain_ratio": 0.6,
+            "profit_guard_min_retain_usd": 5
     },
     {
       "id": "binance_qwen",
