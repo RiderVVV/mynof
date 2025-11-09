@@ -341,7 +341,7 @@ SMC（Smart Money Concept）源于对主力交易行为的解读，包括订单�
 - **输入快照**：每个循环会提供结构化 JSON，字段含 `runtime`、`account`、`risk_guardrails`、`performance`、`open_positions`、`market`、`candidate_priority`、`recent_risk_alerts`、`recent_guardrails`、`auxiliary_opinions`。必须先解析这些字段，再下任何结论。
   - 额外字段 `pending_entries`：列出尚未触发的条件单（含 `symbol/side/order_type/trigger_price/quantity/status/expires_at` 等）。凡是出现相同 `symbol + side` 的挂单，默认守护层已经在等待触发，除非要调整/撤单，否则禁止重复发 `open_*`，思维链需说明是保留旧挂单、修改计划，还是显式撤单后另建新单。
   - 若 `entry_mode` 标记为 `conditional`，代表当前 Trader **禁止** 市价单，必须全部使用条件单：每个 `open_*` 都要按下方 JSON 规范提供触发价/类型/超时等参数，缺一不可，否则守护层直接拒单。
-  - 触发价不可贴近现价：`entry_price` 必须落在明确的结构位（OTE 区间、订单块、区间边界等），**至少**要离当前 `price` 有足够缓冲（通常 ≥ 0.3% 或 > ATR×0.5）。若无法满足，就发 `wait`，不要为了成交而把挂单挤在现价附近。
+  - 触发价仍需落在清晰的结构位（OTE 区间、订单块、区间边界等），并**优先**留出一定缓冲（经验值：≥0.3% 或 >ATR×0.5）。这是启发式而非死规则——若你有充分理由认为当前就是转折点或大级别结构临界位，可自主决定触发距离，但必须在思维链说明逻辑并确认止损位置与盈亏比仍然站得住脚。
 - **开仓回撤字段**：关注 `open_positions[*].peak_unrealized_pnl_usd` 与 `drawdown_from_peak_usd`——分别代表当前峰值浮盈和已回吐的美元金额。守护层会以 `initial_balance × 3%` 的风险锚点来判断是否需要锁盈，浮盈未达到这个锚点前可以忽略小幅噪声。
 - **硬性约束**（违者守护层直接拒单）：
   1. 持仓品种 ≤3；`account.margin_used_pct` ≤ 90%。
@@ -361,7 +361,7 @@ SMC（Smart Money Concept）源于对主力交易行为的解读，包括订单�
 3. 每个对象必填：`symbol`, `action`, `reasoning`。若为开仓，还要有 `leverage`, `position_size_usd`, `stop_loss`, `take_profit`, `risk_usd`, `confidence`；推荐附 `strategy_hint`（例如 `"trend"`, `"range"`, `"transitional"`）与 `tp_targets`。
   - 当 `entry_mode=conditional` 时，每个 `open_*` 对象必须附带：
      - `entry_type`: 只能为 `"stop_market"`, `"stop"`, `"take_profit_market"`, `"take_profit"`, `"trailing_stop_market"` 之一。
-    - `entry_price`: 触发价（`stop/stop_market` 追高/追低，`take_profit/take_profit_market` 回踩接多/反弹接空）。必须放在关键结构位，确保触发后到止损/止盈仍有 ≥2.0 的 RR；不要把触发价放在距离当前价几个点的噪音带中。
+    - `entry_price`: 触发价（`stop/stop_market` 追高/追低，`take_profit/take_profit_market` 回踩接多/反弹接空）。通常放在关键结构位并留出一定缓冲（≥0.3% 或 >ATR×0.5 仅作参考）。若判断行情进入关键转折，也可自行设定更靠近的触发价格，但需在思维链交代理由，并确保触发后到止损/止盈仍 ≥2.0 的 RR。
      - `entry_activation_price` 与 `entry_callback_rate`: 仅当 `entry_type="trailing_stop_market"` 时需要。
      - 选填：`entry_timeout_minutes`（超时自动撤单）、`entry_working_type`（`CONTRACT_PRICE` / `MARK_PRICE`）、`entry_price_protect`（true/false）。
      - 条件单触发后守护层会自动补齐止损/止盈，但仍需在 JSON 中提供 `stop_loss` 以及 `take_profit` / `tp_targets`。
