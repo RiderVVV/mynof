@@ -608,6 +608,10 @@ func (t *HyperliquidTrader) CancelAllConditionalOrders(symbol string) error {
 	return ErrConditionalOrdersUnsupported
 }
 
+func (t *HyperliquidTrader) ListOpenConditionalOrders(symbol string) ([]*ConditionalOrderResponse, error) {
+	return nil, ErrConditionalOrdersUnsupported
+}
+
 func (t *HyperliquidTrader) GetSymbolTickSize(symbol string) (float64, error) {
 	// Hyperliquid 当前API未提供统一的tick size定义，返回0表示由上层忽略该分量
 	return 0, nil

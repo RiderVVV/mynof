@@ -110,4 +110,42 @@ export const api = {
     if (!res.ok) throw new Error('获取AI学习数据失败');
     return res.json();
   },
+
+  async refreshAI(traderId: string) {
+    const res = await fetch(`${API_BASE}/manual/refresh-ai`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        trader_id: traderId,
+        reason: 'dashboard_manual',
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.error || '手动刷新AI失败');
+    }
+    return data;
+  },
+
+  async closePosition(traderId: string, payload: { symbol: string; side: string; quantity?: number }) {
+    const res = await fetch(`${API_BASE}/manual/close-position`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        trader_id: traderId,
+        symbol: payload.symbol,
+        side: payload.side,
+        quantity: payload.quantity ?? 0,
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.error || '手动平仓失败');
+    }
+    return data;
+  },
 };

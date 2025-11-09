@@ -53,6 +53,9 @@ type Trader interface {
 	// CancelAllConditionalOrders 取消某交易对下所有条件单
 	CancelAllConditionalOrders(symbol string) error
 
+	// ListOpenConditionalOrders 查询当前所有未触发的条件单（用于重启恢复）
+	ListOpenConditionalOrders(symbol string) ([]*ConditionalOrderResponse, error)
+
 	// GetSymbolTickSize 返回该交易对的最小价格步长（若不支持则返回0）
 	GetSymbolTickSize(symbol string) (float64, error)
 }

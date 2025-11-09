@@ -37,10 +37,12 @@ type ConditionalOrderResponse struct {
 	TriggerPrice    string `json:"triggerPrice"`
 	WorkingType     string `json:"workingType"`
 	PriceMatch      string `json:"priceMatch"`
+	PriceProtect    bool   `json:"priceProtect"`
 	AlgoStatus      string `json:"algoStatus"`
 	TriggerStatus   string `json:"triggerStatus"`
 	ActivationPrice string `json:"activationPrice"`
 	CallbackRate    string `json:"callbackRate"`
+	CreateTime      int64  `json:"createTime"`
 	UpdateTime      int64  `json:"updateTime"`
 	ErrorCode       int    `json:"code"`
 	Message         string `json:"msg"`

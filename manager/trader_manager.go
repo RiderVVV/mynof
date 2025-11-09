@@ -221,3 +221,21 @@ func (tm *TraderManager) GetComparisonData() (map[string]interface{}, error) {
 
 	return comparison, nil
 }
+
+// TriggerManualCycle 手动触发指定Trader的AI决策周期
+func (tm *TraderManager) TriggerManualCycle(traderID, reason string) error {
+	trader, err := tm.GetTrader(traderID)
+	if err != nil {
+		return err
+	}
+	return trader.TriggerManualCycle(reason)
+}
+
+// ManualClosePosition 手动平仓指定Trader的持仓
+func (tm *TraderManager) ManualClosePosition(traderID, symbol, side string, quantity float64) (map[string]interface{}, error) {
+	trader, err := tm.GetTrader(traderID)
+	if err != nil {
+		return nil, err
+	}
+	return trader.ManualClosePosition(symbol, side, quantity)
+}

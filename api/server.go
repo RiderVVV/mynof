@@ -77,6 +77,10 @@ func (s *Server) setupRoutes() {
 		api.GET("/statistics", s.handleStatistics)
 		api.GET("/equity-history", s.handleEquityHistory)
 		api.GET("/performance", s.handlePerformance)
+
+		// 手动操作
+		api.POST("/manual/refresh-ai", s.handleManualRefreshAI)
+		api.POST("/manual/close-position", s.handleManualClosePosition)
 	}
 }
 
@@ -401,6 +405,72 @@ func (s *Server) handlePerformance(c *gin.Context) {
 	c.JSON(http.StatusOK, performance)
 }
 
+type manualRefreshRequest struct {
+	TraderID string `json:"trader_id"`
+	Reason   string `json:"reason"`
+}
+
+// handleManualRefreshAI 立即触发AI决策
+func (s *Server) handleManualRefreshAI(c *gin.Context) {
+	var req manualRefreshRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": fmt.Sprintf("请求体解析失败: %v", err),
+		})
+		return
+	}
+	if req.TraderID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "trader_id不能为空"})
+		return
+	}
+
+	if err := s.traderManager.TriggerManualCycle(req.TraderID, req.Reason); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": fmt.Sprintf("手动刷新AI失败: %v", err),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "AI决策已立即触发",
+	})
+}
+
+type manualCloseRequest struct {
+	TraderID string  `json:"trader_id"`
+	Symbol   string  `json:"symbol"`
+	Side     string  `json:"side"`
+	Quantity float64 `json:"quantity"`
+}
+
+// handleManualClosePosition 手动平仓
+func (s *Server) handleManualClosePosition(c *gin.Context) {
+	var req manualCloseRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": fmt.Sprintf("请求体解析失败: %v", err),
+		})
+		return
+	}
+	if req.TraderID == "" || req.Symbol == "" || req.Side == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "trader_id、symbol、side均不能为空"})
+		return
+	}
+
+	order, err := s.traderManager.ManualClosePosition(req.TraderID, req.Symbol, req.Side, req.Quantity)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": fmt.Sprintf("手动平仓失败: %v", err),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": fmt.Sprintf("已提交 %s %s 平仓", req.Symbol, req.Side),
+		"order":   order,
+	})
+}
+
 // Start 启动服务器
 func (s *Server) Start() error {
 	addr := fmt.Sprintf(":%d", s.port)
@@ -416,6 +486,8 @@ func (s *Server) Start() error {
 	log.Printf("  • GET  /api/statistics?trader_id=xxx - 指定trader的统计信息")
 	log.Printf("  • GET  /api/equity-history?trader_id=xxx - 指定trader的收益率历史数据")
 	log.Printf("  • GET  /api/performance?trader_id=xxx - 指定trader的AI学习表现分析")
+	log.Printf("  • POST /api/manual/refresh-ai        - 手动触发AI决策")
+	log.Printf("  • POST /api/manual/close-position    - 手动平仓指定持仓")
 	log.Printf("  • GET  /health               - 健康检查")
 	log.Println()
 

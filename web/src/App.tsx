@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import useSWR from 'swr';
+import useSWR, { useSWRConfig } from 'swr';
 import { api } from './lib/api';
 import { EquityChart } from './components/EquityChart';
 import { CompetitionPage } from './components/CompetitionPage';
@@ -388,6 +388,60 @@ function TraderDetailsPage({
     }
     return `${minutes} min`;
   };
+  const traderId = selectedTrader.trader_id;
+  const { mutate } = useSWRConfig();
+  const [isRefreshingAI, setIsRefreshingAI] = useState(false);
+  const [closingKey, setClosingKey] = useState<string | null>(null);
+  const [actionMessage, setActionMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  useEffect(() => {
+    if (!actionMessage) return;
+    const timer = setTimeout(() => setActionMessage(null), 6000);
+    return () => clearTimeout(timer);
+  }, [actionMessage]);
+
+  const handleManualRefresh = async () => {
+    if (!traderId) return;
+    setIsRefreshingAI(true);
+    setActionMessage(null);
+    try {
+      await api.refreshAI(traderId);
+      setActionMessage({ type: 'success', text: t('manualRefreshSuccess', language) });
+      mutate(`status-${traderId}`);
+      mutate(`account-${traderId}`);
+      mutate(`positions-${traderId}`);
+      mutate(`decisions/latest-${traderId}`);
+      mutate(`statistics-${traderId}`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setActionMessage({ type: 'error', text: t('manualActionError', language, { error: message }) });
+    } finally {
+      setIsRefreshingAI(false);
+    }
+  };
+
+  const handleManualClose = async (pos: Position) => {
+    if (!traderId) return;
+    const sideLabel = t(pos.side === 'long' ? 'long' : 'short', language);
+    const confirmText = t('confirmManualClose', language, { symbol: pos.symbol, side: sideLabel });
+    if (!window.confirm(confirmText)) {
+      return;
+    }
+    const key = `${pos.symbol}_${pos.side}`;
+    setClosingKey(key);
+    setActionMessage(null);
+    try {
+      await api.closePosition(traderId, { symbol: pos.symbol, side: pos.side, quantity: pos.quantity });
+      setActionMessage({ type: 'success', text: t('manualCloseSuccess', language, { symbol: pos.symbol }) });
+      mutate(`positions-${traderId}`);
+      mutate(`account-${traderId}`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setActionMessage({ type: 'error', text: t('manualActionError', language, { error: message }) });
+    } finally {
+      setClosingKey(null);
+    }
+  };
 
   return (
     <div>
@@ -410,7 +464,37 @@ function TraderDetailsPage({
             </>
           )}
         </div>
+        <div className="mt-4 flex flex-wrap gap-3 items-center">
+          <button
+            onClick={handleManualRefresh}
+            disabled={isRefreshingAI}
+            className="px-4 py-2 rounded text-sm font-semibold transition-all"
+            style={{
+              background: isRefreshingAI ? 'rgba(240, 185, 11, 0.3)' : 'linear-gradient(135deg, #F0B90B 0%, #FCD535 100%)',
+              color: '#000',
+              boxShadow: '0 6px 20px rgba(240, 185, 11, 0.3)',
+              opacity: isRefreshingAI ? 0.7 : 1,
+              cursor: isRefreshingAI ? 'not-allowed' : 'pointer',
+            }}
+          >
+            {isRefreshingAI ? t('manualRefreshing', language) : t('manualRefreshAI', language)}
+          </button>
+          <span className="text-xs" style={{ color: '#848E9C' }}>
+            {t('manualRefreshHint', language)}
+          </span>
+        </div>
       </div>
+
+      {actionMessage && (
+        <div
+          className="mb-6 rounded px-4 py-3 text-sm font-semibold"
+          style={actionMessage.type === 'success'
+            ? { background: 'rgba(14, 203, 129, 0.12)', border: '1px solid rgba(14, 203, 129, 0.3)', color: '#0ECB81' }
+            : { background: 'rgba(246, 70, 93, 0.12)', border: '1px solid rgba(246, 70, 93, 0.3)', color: '#F6465D' }}
+        >
+          {actionMessage.text}
+        </div>
+      )}
 
       {status && (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
@@ -532,6 +616,7 @@ function TraderDetailsPage({
                   <th className="pb-3 font-semibold text-gray-400">{t('leverage', language)}</th>
                   <th className="pb-3 font-semibold text-gray-400">{t('unrealizedPnL', language)}</th>
                   <th className="pb-3 font-semibold text-gray-400">{t('liqPrice', language)}</th>
+                  <th className="pb-3 font-semibold text-gray-400 text-right">{t('actions', language)}</th>
                 </tr>
               </thead>
               <tbody>
@@ -566,6 +651,22 @@ function TraderDetailsPage({
                     </td>
                     <td className="py-3 font-mono" style={{ color: '#848E9C' }}>
                       {pos.liquidation_price.toFixed(4)}
+                    </td>
+                    <td className="py-3 text-right">
+                      <button
+                        onClick={() => handleManualClose(pos)}
+                        disabled={closingKey === `${pos.symbol}_${pos.side}`}
+                        className="px-3 py-1.5 rounded text-xs font-semibold transition-all"
+                        style={{
+                          background: 'rgba(240, 185, 11, 0.12)',
+                          color: '#F0B90B',
+                          border: '1px solid rgba(240, 185, 11, 0.3)',
+                          opacity: closingKey === `${pos.symbol}_${pos.side}` ? 0.6 : 1,
+                          cursor: closingKey === `${pos.symbol}_${pos.side}` ? 'not-allowed' : 'pointer',
+                        }}
+                      >
+                        {closingKey === `${pos.symbol}_${pos.side}` ? t('closingPosition', language) : t('manualClose', language)}
+                      </button>
                     </td>
                   </tr>
                 ))}

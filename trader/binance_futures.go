@@ -703,6 +703,17 @@ func (t *FuturesTrader) PlaceConditionalOrder(req *ConditionalOrderRequest) (*Co
 	if req.CallbackRate != "" {
 		params.Set("callbackRate", req.CallbackRate)
 	}
+	log.Printf("  ⇢ Binance /fapi/v1/algoOrder 请求: symbol=%s side=%s type=%s trigger=%s price=%s qty=%s working=%s clientAlgoId=%s priceProtect=%t",
+		params.Get("symbol"),
+		params.Get("side"),
+		params.Get("type"),
+		params.Get("triggerPrice"),
+		params.Get("price"),
+		params.Get("quantity"),
+		params.Get("workingType"),
+		params.Get("clientAlgoId"),
+		req.PriceProtect,
+	)
 	data, err := t.signedRequest(context.Background(), http.MethodPost, "/fapi/v1/algoOrder", params, true)
 	if err != nil {
 		return nil, err
@@ -712,8 +723,10 @@ func (t *FuturesTrader) PlaceConditionalOrder(req *ConditionalOrderRequest) (*Co
 		return nil, err
 	}
 	if resp.ErrorCode != 0 && resp.ErrorCode != 200 {
+		log.Printf("  ⇠ Binance /fapi/v1/algoOrder 错误: code=%d msg=%s", resp.ErrorCode, resp.Message)
 		return nil, fmt.Errorf("binance algo order error %d: %s", resp.ErrorCode, resp.Message)
 	}
+	log.Printf("  ⇠ Binance /fapi/v1/algoOrder 成功: algoId=%d status=%s triggerStatus=%s", resp.AlgoID, resp.AlgoStatus, resp.TriggerStatus)
 	return &resp, nil
 }
 
@@ -762,6 +775,58 @@ func (t *FuturesTrader) CancelAllConditionalOrders(symbol string) error {
 	params.Set("symbol", strings.ToUpper(symbol))
 	_, err := t.signedRequest(context.Background(), http.MethodDelete, "/fapi/v1/algoOpenOrders", params, false)
 	return err
+}
+
+func (t *FuturesTrader) ListOpenConditionalOrders(symbol string) ([]*ConditionalOrderResponse, error) {
+	params := url.Values{}
+	if strings.TrimSpace(symbol) != "" {
+		params.Set("symbol", strings.ToUpper(symbol))
+	}
+	data, err := t.signedRequest(context.Background(), http.MethodGet, "/fapi/v1/algoOpenOrders", params, false)
+	if err != nil {
+		return nil, err
+	}
+
+	orders, err := decodeConditionalOrdersPayload(data)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]*ConditionalOrderResponse, 0, len(orders))
+	for i := range orders {
+		entry := orders[i]
+		copy := entry
+		result = append(result, &copy)
+	}
+	return result, nil
+}
+
+func decodeConditionalOrdersPayload(data []byte) ([]ConditionalOrderResponse, error) {
+	type envelope struct {
+		Orders     json.RawMessage `json:"orders"`
+		AlgoOrders json.RawMessage `json:"algoOrders"`
+	}
+
+	var env envelope
+	if err := json.Unmarshal(data, &env); err == nil {
+		if len(env.Orders) > 0 {
+			var items []ConditionalOrderResponse
+			if err := json.Unmarshal(env.Orders, &items); err == nil {
+				return items, nil
+			}
+		}
+		if len(env.AlgoOrders) > 0 {
+			var items []ConditionalOrderResponse
+			if err := json.Unmarshal(env.AlgoOrders, &items); err == nil {
+				return items, nil
+			}
+		}
+	}
+
+	var direct []ConditionalOrderResponse
+	if err := json.Unmarshal(data, &direct); err == nil {
+		return direct, nil
+	}
+	return nil, fmt.Errorf("unexpected conditional orders payload: %s", string(data))
 }
 
 func (t *FuturesTrader) signedRequest(ctx context.Context, method, endpoint string, params url.Values, includeBody bool) ([]byte, error) {

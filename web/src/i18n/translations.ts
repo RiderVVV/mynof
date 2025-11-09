@@ -38,6 +38,16 @@ export const translations = {
     short: 'SHORT',
     noPositions: 'No Positions',
     noActivePositions: 'No active trading positions',
+    actions: 'Actions',
+    manualClose: 'Close Position',
+    closingPosition: 'Closing...',
+    manualRefreshAI: 'Manual AI Refresh',
+    manualRefreshing: 'Refreshing...',
+    manualRefreshHint: 'Trigger a fresh AI cycle without waiting for the timer.',
+    manualRefreshSuccess: 'AI decision cycle started.',
+    manualCloseSuccess: '{symbol} close order sent.',
+    confirmManualClose: 'Close {symbol} {side} position now?',
+    manualActionError: 'Request failed: {error}',
 
     // Recent Decisions
     recentDecisions: 'Recent Decisions',
@@ -156,6 +166,16 @@ export const translations = {
     short: '空头',
     noPositions: '无持仓',
     noActivePositions: '当前没有活跃的交易持仓',
+    actions: '操作',
+    manualClose: '手动平仓',
+    closingPosition: '执行中...',
+    manualRefreshAI: '手动刷新AI',
+    manualRefreshing: '刷新中...',
+    manualRefreshHint: '无需等待轮询，立即重新请求AI决策',
+    manualRefreshSuccess: '已触发AI最新决策周期',
+    manualCloseSuccess: '{symbol} 平仓指令已发送',
+    confirmManualClose: '确定立即平掉 {symbol} {side} 仓位？',
+    manualActionError: '请求失败：{error}',
 
     // Recent Decisions
     recentDecisions: '最近决策',

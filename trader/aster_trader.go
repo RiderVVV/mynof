@@ -981,3 +981,7 @@ func (t *AsterTrader) CancelConditionalOrder(algoID int64, clientAlgoID string) 
 func (t *AsterTrader) CancelAllConditionalOrders(symbol string) error {
 	return ErrConditionalOrdersUnsupported
 }
+
+func (t *AsterTrader) ListOpenConditionalOrders(symbol string) ([]*ConditionalOrderResponse, error) {
+	return nil, ErrConditionalOrdersUnsupported
+}

@@ -492,7 +492,138 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 		result.config.SimpleTrailingFeePct = simpleTrailingDefaultFeePct
 	}
 
+	if result.entryMode == entryModeConditional {
+		if err := result.restorePendingEntriesFromExchange(); err != nil {
+			log.Printf("⚠️ [%s] 恢复条件单失败: %v", config.Name, err)
+		}
+	}
+
 	return result, nil
+}
+
+func (at *AutoTrader) restorePendingEntriesFromExchange() error {
+	if at.trader == nil {
+		return nil
+	}
+	orders, err := at.trader.ListOpenConditionalOrders("")
+	if err != nil {
+		if errors.Is(err, ErrConditionalOrdersUnsupported) {
+			return nil
+		}
+		return err
+	}
+	if len(orders) == 0 {
+		return nil
+	}
+
+	restored := 0
+	for _, ord := range orders {
+		if ord == nil || ord.ClientAlgoID == "" {
+			continue
+		}
+		if !strings.HasPrefix(strings.ToLower(ord.ClientAlgoID), "nofx-") {
+			continue
+		}
+		entry, err := at.pendingEntryFromConditionalOrder(ord)
+		if err != nil {
+			log.Printf("⚠️ 恢复条件单失败 (%s): %v", ord.ClientAlgoID, err)
+			continue
+		}
+		key := positionKey(entry.Symbol, entry.Side)
+		if _, exists := at.pendingEntries[key]; exists {
+			continue
+		}
+		at.pendingEntries[key] = entry
+		restored++
+	}
+	if restored > 0 {
+		log.Printf("♻️ [%s] 已从交易所恢复 %d 条未触发条件单", at.name, restored)
+	}
+	return nil
+}
+
+func (at *AutoTrader) pendingEntryFromConditionalOrder(order *ConditionalOrderResponse) (*pendingEntry, error) {
+	symbol := market.Normalize(order.Symbol)
+	if symbol == "" {
+		return nil, fmt.Errorf("symbol missing for algoId=%d", order.AlgoID)
+	}
+
+	side := strings.ToLower(strings.TrimSpace(order.PositionSide))
+	if side == "" {
+		switch strings.ToUpper(strings.TrimSpace(order.Side)) {
+		case "BUY":
+			side = "long"
+		case "SELL":
+			side = "short"
+		default:
+			return nil, fmt.Errorf("unknown side for algoId=%d", order.AlgoID)
+		}
+	}
+	if side != "long" && side != "short" {
+		return nil, fmt.Errorf("unsupported side %q", side)
+	}
+
+	quantity := parseNumericString(order.Quantity)
+	if quantity <= 0 {
+		return nil, fmt.Errorf("invalid quantity %q for algoId=%d", order.Quantity, order.AlgoID)
+	}
+
+	triggerPrice := parseNumericString(order.TriggerPrice)
+	if triggerPrice == 0 {
+		triggerPrice = parseNumericString(order.ActivationPrice)
+	}
+	limitPrice := parseNumericString(order.Price)
+
+	createdAt := time.Now()
+	switch {
+	case order.CreateTime > 0:
+		createdAt = time.UnixMilli(order.CreateTime)
+	case order.UpdateTime > 0:
+		createdAt = time.UnixMilli(order.UpdateTime)
+	}
+
+	status := strings.ToUpper(strings.TrimSpace(order.AlgoStatus))
+	if status == "" {
+		status = "NEW"
+	}
+	switch status {
+	case "TRIGGERED", "FILLED", "FINISHED", "CALCULATED", "CANCELED", "EXPIRED", "REJECTED":
+		return nil, fmt.Errorf("algoId=%d already finalized with status=%s", order.AlgoID, status)
+	}
+
+	expiresAt := createdAt.Add(at.entryTimeout)
+	if time.Now().After(expiresAt) {
+		expiresAt = time.Now().Add(time.Minute)
+	}
+
+	return &pendingEntry{
+		Symbol:          symbol,
+		Side:            side,
+		AlgoID:          order.AlgoID,
+		ClientAlgoID:    order.ClientAlgoID,
+		OrderType:       order.OrderType,
+		TriggerPrice:    triggerPrice,
+		LimitPrice:      limitPrice,
+		Quantity:        quantity,
+		CreatedAt:       createdAt,
+		ExpiresAt:       expiresAt,
+		WorkingType:     order.WorkingType,
+		PriceProtect:    order.PriceProtect,
+		Status:          status,
+		MinHoldDuration: 45 * time.Minute,
+	}, nil
+}
+
+func parseNumericString(value string) float64 {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return 0
+	}
+	num, err := strconv.ParseFloat(trimmed, 64)
+	if err != nil {
+		return 0
+	}
+	return num
 }
 
 func initEnsembleModel(parent AutoTraderConfig, cfg EnsembleModelConfig) (ensembleModel, error) {
@@ -3658,6 +3789,27 @@ func (at *AutoTrader) placeConditionalOpen(plan *decision.Decision, actionRecord
 		}
 	}
 	entryTimeout := at.resolveEntryTimeout(plan, triggerValue, livePrice)
+	triggerDisplay := req.TriggerPrice
+	if triggerDisplay == "" && req.ActivationPrice != "" {
+		triggerDisplay = req.ActivationPrice
+	}
+	limitDisplay := req.Price
+	if limitDisplay == "" && req.CallbackRate != "" {
+		limitDisplay = fmt.Sprintf("callback=%s", req.CallbackRate)
+	}
+	log.Printf(
+		"  ↪️ 发送 Binance 条件单准备: symbol=%s side=%s type=%s trigger=%s limit=%s qty=%s working=%s priceProtect=%t timeout=%.0fmin clientAlgoId=%s",
+		req.Symbol,
+		side,
+		orderType,
+		triggerDisplay,
+		limitDisplay,
+		req.Quantity,
+		workingType,
+		req.PriceProtect,
+		entryTimeout.Minutes(),
+		req.ClientAlgoID,
+	)
 	resp, err := at.trader.PlaceConditionalOrder(req)
 	if err != nil {
 		return err
