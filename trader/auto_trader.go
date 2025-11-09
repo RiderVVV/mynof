@@ -30,6 +30,8 @@ const (
 	defaultMinRewardToRisk   = 2.0   // 默认最小盈亏比
 	coolingMinRewardToRisk   = 2.0   // 冷却阶段最小盈亏比
 	coolingConfidenceMinimum = 75    // 冷却阶段最小信心
+	clientAlgoIDPrefix       = "nofx"
+	maxClientAlgoIDLength    = 36
 )
 
 // AutoTraderConfig 自动交易配置（简化版 - AI全权决策）
@@ -2607,6 +2609,42 @@ func normalizeConditionalOrderType(entryType string) (futures.OrderType, bool) {
 	}
 }
 
+func generateClientAlgoID(symbol string) string {
+	clean := sanitizeClientAlgoSymbol(symbol)
+	timestamp := strconv.FormatInt(time.Now().UnixNano(), 36)
+	maxSymbolLen := maxClientAlgoIDLength - len(clientAlgoIDPrefix) - len(timestamp) - 2
+	if maxSymbolLen < 1 {
+		maxSymbolLen = 1
+	}
+	if len(clean) > maxSymbolLen {
+		clean = clean[:maxSymbolLen]
+	}
+	return fmt.Sprintf("%s-%s-%s", clientAlgoIDPrefix, clean, timestamp)
+}
+
+func sanitizeClientAlgoSymbol(symbol string) string {
+	symbol = strings.ToLower(strings.TrimSpace(symbol))
+	symbol = strings.ReplaceAll(symbol, " ", "")
+	if symbol == "" {
+		return "sym"
+	}
+	builder := strings.Builder{}
+	for _, r := range symbol {
+		switch {
+		case r >= 'a' && r <= 'z':
+			builder.WriteRune(r)
+		case r >= '0' && r <= '9':
+			builder.WriteRune(r)
+		case r == '_' || r == '-' || r == '/' || r == ':' || r == '.':
+			builder.WriteRune(r)
+		}
+	}
+	if builder.Len() == 0 {
+		return "sym"
+	}
+	return builder.String()
+}
+
 func positionKey(symbol, side string) string {
 	return strings.ToUpper(strings.TrimSpace(symbol)) + "_" + strings.ToLower(strings.TrimSpace(side))
 }
@@ -3775,7 +3813,7 @@ func (at *AutoTrader) placeConditionalOpen(plan *decision.Decision, actionRecord
 		TimeInForce:  futures.TimeInForceTypeGTC,
 		Quantity:     quantityStr,
 		WorkingType:  workingType,
-		ClientAlgoID: fmt.Sprintf("nofx-%s-%d", strings.ToLower(plan.Symbol), time.Now().UnixNano()),
+		ClientAlgoID: generateClientAlgoID(plan.Symbol),
 		PriceProtect: at.resolveEntryPriceProtect(plan),
 	}
 	triggerValue := plan.EntryPrice
