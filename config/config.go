@@ -30,6 +30,20 @@ type EnsembleConfig struct {
 	Models      []EnsembleModelConfig `json:"models,omitempty"`
 }
 
+// TradingWindowConfig 限定交易时段（UTC）
+type TradingWindowConfig struct {
+	Enabled   bool `json:"enabled"`
+	StartHour int  `json:"start_hour"` // 0-23
+	EndHour   int  `json:"end_hour"`   // 0-24
+}
+
+// MajorEventConfig 重大事件窗口
+type MajorEventConfig struct {
+	Name     string `json:"name"`
+	StartUTC string `json:"start_utc"` // RFC3339
+	EndUTC   string `json:"end_utc"`   // RFC3339
+}
+
 // TraderConfig 单个trader的配置
 type TraderConfig struct {
 	ID         string `json:"id"`
@@ -67,6 +81,11 @@ type TraderConfig struct {
 	CustomAPIXTitle      string `json:"custom_api_x_title,omitempty"`
 
 	Ensemble EnsembleConfig `json:"ensemble,omitempty"`
+
+	FocusSymbols    []string            `json:"focus_symbols,omitempty"`
+	MaxTradeRiskUSD float64             `json:"max_trade_risk_usd,omitempty"`
+	TradingWindow   TradingWindowConfig `json:"trading_window,omitempty"`
+	MajorEvents     []MajorEventConfig  `json:"major_events,omitempty"`
 
 	InitialBalance       float64 `json:"initial_balance"`
 	ScanIntervalMinutes  int     `json:"scan_interval_minutes"`
@@ -203,6 +222,18 @@ func (c *Config) Validate() error {
 					return fmt.Errorf("trader[%d]: 使用OpenRouter时必须至少配置custom_api_http_referer或custom_api_x_title", i)
 				}
 			}
+		}
+		if trader.MaxTradeRiskUSD < 0 {
+			return fmt.Errorf("trader[%d]: max_trade_risk_usd 不能为负", i)
+		}
+		if trader.TradingWindow.StartHour < 0 || trader.TradingWindow.StartHour > 23 {
+			return fmt.Errorf("trader[%d]: trading_window.start_hour 需在0-23之间", i)
+		}
+		if trader.TradingWindow.EndHour < 0 || trader.TradingWindow.EndHour > 24 {
+			return fmt.Errorf("trader[%d]: trading_window.end_hour 需在0-24之间", i)
+		}
+		if trader.TradingWindow.Enabled && trader.TradingWindow.StartHour == trader.TradingWindow.EndHour {
+			return fmt.Errorf("trader[%d]: trading_window start_hour 与 end_hour 不能相同", i)
 		}
 		if trader.InitialBalance <= 0 {
 			return fmt.Errorf("trader[%d]: initial_balance必须大于0", i)

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"nofx/config"
 	"nofx/decision"
 	"nofx/logger"
 	"nofx/market"
@@ -20,10 +21,10 @@ const (
 	minOrderNotionalUSD      = 5.1   // 略高于交易所 5 USDT 的硬性下限，避免因边界舍入被拒单
 	riskBudgetFraction       = 0.03  // 默认风险预算（3%净值）
 	coolingRiskFraction      = 0.015 // 冷却阶段风险预算减半
-	minStopDistancePct       = 0.15  // 止损至少距离现价0.15%
-	maxSnapshotDriftPct      = 0.35  // 决策生成到执行的最大允许价格偏移(%)
-	defaultMinRewardToRisk   = 2.0   // 默认最小盈亏比
-	coolingMinRewardToRisk   = 2.8   // 冷却阶段最小盈亏比
+	minStopDistancePct       = 0.8   // 止损至少距离现价0.8%
+	maxSnapshotDriftPct      = 0.2   // 决策生成到执行的最大允许价格偏移(%)
+	defaultMinRewardToRisk   = 3.0   // 默认最小盈亏比
+	coolingMinRewardToRisk   = 4.0   // 冷却阶段最小盈亏比
 	coolingConfidenceMinimum = 80    // 冷却阶段最小信心
 )
 
@@ -69,6 +70,11 @@ type AutoTraderConfig struct {
 	EnsembleMode        string
 	EnsembleSummaryMode string
 	EnsembleModels      []EnsembleModelConfig
+
+	FocusSymbols    []string
+	MaxTradeRiskUSD float64
+	TradingWindow   config.TradingWindowConfig
+	MajorEvents     []config.MajorEventConfig
 
 	// 扫描配置
 	ScanInterval  time.Duration // 扫描间隔（建议3分钟）
@@ -153,6 +159,12 @@ type riskCheckResult struct {
 	riskLimitUSD float64
 }
 
+type majorEventWindow struct {
+	Name  string
+	Start time.Time
+	End   time.Time
+}
+
 // AutoTrader 自动交易器
 type AutoTrader struct {
 	id                    string // Trader唯一标识
@@ -181,6 +193,11 @@ type AutoTrader struct {
 	positionTargets       map[string]*positionManagementState
 	lastMarketData        map[string]*market.Data
 	activeContext         *decision.Context
+	maxTradeRiskUSD       float64
+	focusSymbols          []string
+	focusSymbolSet        map[string]struct{}
+	tradingWindow         config.TradingWindowConfig
+	majorEvents           []majorEventWindow
 }
 
 type profitProtectionThresholds struct {
@@ -306,6 +323,44 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 	logDir := fmt.Sprintf("decision_logs/%s", config.ID)
 	decisionLogger := logger.NewDecisionLogger(logDir)
 
+	maxRisk := config.MaxTradeRiskUSD
+	if maxRisk <= 0 {
+		maxRisk = config.InitialBalance * riskBudgetFraction
+	}
+
+	focusSet := make(map[string]struct{})
+	focusList := make([]string, 0, len(config.FocusSymbols))
+	for _, sym := range config.FocusSymbols {
+		normalized := market.Normalize(sym)
+		if normalized == "" {
+			continue
+		}
+		if _, exists := focusSet[normalized]; exists {
+			continue
+		}
+		focusSet[normalized] = struct{}{}
+		focusList = append(focusList, normalized)
+	}
+
+	var majorEvents []majorEventWindow
+	for _, evt := range config.MajorEvents {
+		start, err1 := time.Parse(time.RFC3339, strings.TrimSpace(evt.StartUTC))
+		end, err2 := time.Parse(time.RFC3339, strings.TrimSpace(evt.EndUTC))
+		if err1 != nil || err2 != nil {
+			log.Printf("⚠️  解析重大事件时间失败 (%s): %v %v", evt.Name, err1, err2)
+			continue
+		}
+		if end.Before(start) {
+			start, end = end, start
+		}
+		window := majorEventWindow{
+			Name:  evt.Name,
+			Start: start.Add(-4 * time.Hour),
+			End:   end.Add(4 * time.Hour),
+		}
+		majorEvents = append(majorEvents, window)
+	}
+
 	result := &AutoTrader{
 		id:                    config.ID,
 		name:                  config.Name,
@@ -330,6 +385,11 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 		ensembleModels:        ensembleModels,
 		positionTargets:       make(map[string]*positionManagementState),
 		lastMarketData:        make(map[string]*market.Data),
+		maxTradeRiskUSD:       maxRisk,
+		focusSymbols:          focusList,
+		focusSymbolSet:        focusSet,
+		tradingWindow:         config.TradingWindow,
+		majorEvents:           majorEvents,
 	}
 	if result.config.SimpleTrailingFeePct <= 0 {
 		result.config.SimpleTrailingFeePct = simpleTrailingDefaultFeePct
@@ -732,6 +792,15 @@ func (at *AutoTrader) runCycle() error {
 			continue
 		}
 
+		if isOpenAction(d.Action) {
+			if ok, reason := at.canOpenPositions(time.Now().UTC()); !ok {
+				msg := fmt.Sprintf("⏸ %s %s 因 %s 暂停执行", d.Symbol, d.Action, reason)
+				log.Println(msg)
+				record.ExecutionLog = append(record.ExecutionLog, msg)
+				continue
+			}
+		}
+
 		actionRecord := logger.DecisionAction{
 			Action:    d.Action,
 			Symbol:    d.Symbol,
@@ -1076,29 +1145,10 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		}
 	}
 
-	// 3. 获取合并的候选币种池（AI500 + OI Top，去重）
-	// 无论有没有持仓，都分析相同数量的币种（让AI看到所有好机会）
-	// AI会根据保证金使用率和现有持仓情况，自己决定是否要换仓
-	const ai500Limit = 20 // AI500取前20个评分最高的币种
-
-	// 获取合并后的币种池（AI500 + OI Top）
-	mergedPool, err := pool.GetMergedCoinPool(ai500Limit)
+	candidateCoins, err := at.buildCandidateCoins(positionInfos)
 	if err != nil {
-		return nil, fmt.Errorf("获取合并币种池失败: %w", err)
+		return nil, err
 	}
-
-	// 构建候选币种列表（包含来源信息）
-	var candidateCoins []decision.CandidateCoin
-	for _, symbol := range mergedPool.AllSymbols {
-		sources := mergedPool.SymbolSources[symbol]
-		candidateCoins = append(candidateCoins, decision.CandidateCoin{
-			Symbol:  symbol,
-			Sources: sources, // "ai500" 和/或 "oi_top"
-		})
-	}
-
-	log.Printf("📋 合并币种池: AI500前%d + OI_Top20 = 总计%d个候选币种",
-		ai500Limit, len(candidateCoins))
 
 	// 4. 计算总盈亏
 	totalPnL := totalEquity - at.initialBalance
@@ -1168,6 +1218,8 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		recentGuardrails = recentGuardrails[len(recentGuardrails)-limit:]
 	}
 
+	riskBudget := at.baseRiskBudget(totalEquity)
+
 	// 6. 构建上下文
 	ctx := &decision.Context{
 		CurrentTime:      time.Now().Format("2006-01-02 15:04:05"),
@@ -1192,11 +1244,80 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		RecentGuardrails: recentGuardrails,
 	}
 
-	perfState, cooling := derivePerformanceCoolingState(performance, ctx.Account.TotalEquity*riskBudgetFraction, recentRiskUsage)
+	perfState, cooling := derivePerformanceCoolingState(performance, riskBudget, recentRiskUsage)
 	ctx.PerformanceState = perfState
 	ctx.SharpeCooling = cooling
 
 	return ctx, nil
+}
+
+func (at *AutoTrader) buildCandidateCoins(positionInfos []decision.PositionInfo) ([]decision.CandidateCoin, error) {
+	if len(at.focusSymbols) > 0 {
+		result := make([]decision.CandidateCoin, 0, len(at.focusSymbols)+len(positionInfos))
+		slots := make(map[string]*decision.CandidateCoin)
+		order := make([]string, 0)
+
+		addSymbol := func(symbol string, source string) {
+			normalized := market.Normalize(symbol)
+			if normalized == "" {
+				return
+			}
+			slot, exists := slots[normalized]
+			if !exists {
+				slot = &decision.CandidateCoin{Symbol: normalized}
+				slots[normalized] = slot
+				order = append(order, normalized)
+			}
+			if source != "" && !containsString(slot.Sources, source) {
+				slot.Sources = append(slot.Sources, source)
+			}
+		}
+
+		for _, sym := range at.focusSymbols {
+			addSymbol(sym, "whitelist")
+		}
+		for _, pos := range positionInfos {
+			addSymbol(pos.Symbol, "position")
+		}
+
+		for _, symbol := range order {
+			result = append(result, *slots[symbol])
+		}
+
+		log.Printf("📋 使用手动白名单候选: %d 个", len(result))
+		return result, nil
+	}
+
+	const ai500Limit = 20
+	mergedPool, err := pool.GetMergedCoinPool(ai500Limit)
+	if err != nil {
+		return nil, fmt.Errorf("获取合并币种池失败: %w", err)
+	}
+
+	var candidateCoins []decision.CandidateCoin
+	for _, symbol := range mergedPool.AllSymbols {
+		sources := mergedPool.SymbolSources[symbol]
+		candidateCoins = append(candidateCoins, decision.CandidateCoin{
+			Symbol:  symbol,
+			Sources: sources,
+		})
+	}
+
+	log.Printf("📋 合并币种池: AI500前%d + OI_Top20 = 总计%d个候选币种",
+		ai500Limit, len(candidateCoins))
+
+	return candidateCoins, nil
+}
+
+func (at *AutoTrader) baseRiskBudget(totalEquity float64) float64 {
+	if at.maxTradeRiskUSD > 0 {
+		return at.maxTradeRiskUSD
+	}
+	budget := totalEquity * riskBudgetFraction
+	if budget <= 0 {
+		budget = at.initialBalance * riskBudgetFraction
+	}
+	return budget
 }
 
 func derivePerformanceCoolingState(perf *logger.PerformanceAnalysis, riskBudget float64, recentRiskUsage float64) (string, string) {
@@ -1277,10 +1398,7 @@ func (at *AutoTrader) enforceOpenRisk(decision *decision.Decision, livePrice flo
 		}
 	}
 
-	riskLimit := totalEquity * riskBudgetFraction
-	if riskLimit <= 0 {
-		riskLimit = at.initialBalance * riskBudgetFraction
-	}
+	riskLimit := at.baseRiskBudget(totalEquity)
 	minRR := defaultMinRewardToRisk
 
 	coolingKey := strings.ToLower(strings.TrimSpace(cooling))
@@ -1288,11 +1406,14 @@ func (at *AutoTrader) enforceOpenRisk(decision *decision.Decision, livePrice flo
 		return nil, fmt.Errorf("冷却状态 %s 禁止新开仓", cooling)
 	}
 	if coolingKey == "only_high_confidence_trades" {
-		tmpBudget := totalEquity * coolingRiskFraction
-		if tmpBudget <= 0 {
-			tmpBudget = at.initialBalance * coolingRiskFraction
+		if riskLimit > 0 {
+			riskLimit = riskLimit * 0.5
 		}
-		if tmpBudget > 0 {
+		if riskLimit <= 0 {
+			tmpBudget := totalEquity * coolingRiskFraction
+			if tmpBudget <= 0 {
+				tmpBudget = at.initialBalance * coolingRiskFraction
+			}
 			riskLimit = tmpBudget
 		}
 		minRR = coolingMinRewardToRisk
@@ -1302,6 +1423,13 @@ func (at *AutoTrader) enforceOpenRisk(decision *decision.Decision, livePrice flo
 	}
 	if riskLimit <= 0 {
 		return nil, fmt.Errorf("无法计算风险预算")
+	}
+
+	var atr14 float64
+	if ctx != nil && ctx.MarketDataMap != nil {
+		if data, ok := ctx.MarketDataMap[strings.ToUpper(decision.Symbol)]; ok && data != nil && data.LongerTermContext != nil {
+			atr14 = data.LongerTermContext.ATR14
+		}
 	}
 
 	var stopDistance float64
@@ -1323,6 +1451,10 @@ func (at *AutoTrader) enforceOpenRisk(decision *decision.Decision, livePrice flo
 	stopDistancePct := (stopDistance / livePrice) * 100
 	if stopDistancePct < minStopDistancePct {
 		return nil, fmt.Errorf("止损距离 %.4f%% 低于最小阈值 %.2f%%", stopDistancePct, minStopDistancePct)
+	}
+
+	if atr14 > 0 && stopDistance < atr14 {
+		return nil, fmt.Errorf("止损距离 %.4f 低于4h ATR %.4f", stopDistance, atr14)
 	}
 
 	riskUSD := decision.PositionSizeUSD * (stopDistance / livePrice)
@@ -1487,6 +1619,53 @@ func (at *AutoTrader) fillActionRecordFromOrder(actionRecord *logger.DecisionAct
 			actionRecord.Quantity = cumQuote / price
 		}
 	}
+}
+
+func containsString(list []string, value string) bool {
+	for _, item := range list {
+		if item == value {
+			return true
+		}
+	}
+	return false
+}
+
+func (at *AutoTrader) canOpenPositions(now time.Time) (bool, string) {
+	utcNow := now.UTC()
+	if at.tradingWindow.Enabled {
+		start := at.tradingWindow.StartHour
+		end := at.tradingWindow.EndHour
+		hour := utcNow.Hour()
+		inWindow := false
+		if start < end {
+			inWindow = hour >= start && hour < end
+		} else {
+			// 跨午夜，如 20 -> 6
+			if start == end {
+				inWindow = true
+			} else {
+				inWindow = hour >= start || hour < end
+			}
+		}
+		if !inWindow {
+			return false, fmt.Sprintf("交易窗口(%02d:00-%02d:00 UTC)", start, end)
+		}
+	}
+
+	for _, evt := range at.majorEvents {
+		if evt.Start.IsZero() || evt.End.IsZero() {
+			continue
+		}
+		if (utcNow.Equal(evt.Start) || utcNow.After(evt.Start)) && utcNow.Before(evt.End) {
+			name := evt.Name
+			if name == "" {
+				name = "重大事件"
+			}
+			return false, fmt.Sprintf("%s 窗口", name)
+		}
+	}
+
+	return true, ""
 }
 
 func getOrderFloat(order map[string]interface{}, key string) (float64, bool) {

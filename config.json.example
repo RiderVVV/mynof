@@ -16,6 +16,24 @@
       "guard_interval_minutes": 1,
       "simple_trailing_guard_enabled": true,
       "simple_trailing_fee_pct": 0.03,
+      "focus_symbols": [
+        "BTCUSDT",
+        "ETHUSDT",
+        "SOLUSDT"
+      ],
+      "max_trade_risk_usd": 15,
+      "trading_window": {
+        "enabled": true,
+        "start_hour": 12,
+        "end_hour": 24
+      },
+      "major_events": [
+        {
+          "name": "FOMC",
+          "start_utc": "2024-01-31T18:00:00Z",
+          "end_utc": "2024-01-31T20:00:00Z"
+        }
+      ],
       // 可选：AI风控复核（默认false，设为true启用二次复核）
       "risk_review_enabled": false
     },
