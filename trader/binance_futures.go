@@ -2,12 +2,18 @@ package trader
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/adshao/go-binance/v2/common"
 	"github.com/adshao/go-binance/v2/futures"
 )
 
@@ -621,6 +627,197 @@ func (t *FuturesTrader) FormatQuantity(symbol string, quantity float64) (string,
 
 	format := fmt.Sprintf("%%.%df", precision)
 	return fmt.Sprintf(format, quantity), nil
+}
+
+func (t *FuturesTrader) PlaceConditionalOrder(req *ConditionalOrderRequest) (*ConditionalOrderResponse, error) {
+	if req == nil {
+		return nil, fmt.Errorf("conditional order request cannot be nil")
+	}
+	params := url.Values{}
+	params.Set("algoType", "CONDITIONAL")
+	params.Set("symbol", strings.ToUpper(req.Symbol))
+	params.Set("side", string(req.Side))
+	if req.PositionSide != "" {
+		params.Set("positionSide", string(req.PositionSide))
+	}
+	params.Set("type", string(req.OrderType))
+	if req.TimeInForce != "" {
+		params.Set("timeInForce", string(req.TimeInForce))
+	}
+	if req.Quantity != "" {
+		params.Set("quantity", req.Quantity)
+	}
+	if req.Price != "" {
+		params.Set("price", req.Price)
+	}
+	if req.TriggerPrice != "" {
+		params.Set("triggerPrice", req.TriggerPrice)
+	}
+	if req.WorkingType != "" {
+		params.Set("workingType", string(req.WorkingType))
+	}
+	if req.PriceMatch != "" {
+		params.Set("priceMatch", string(req.PriceMatch))
+	}
+	if req.ClientAlgoID != "" {
+		params.Set("clientAlgoId", req.ClientAlgoID)
+	}
+	if req.PriceProtect {
+		params.Set("priceProtect", "TRUE")
+	}
+	if req.ReduceOnly {
+		params.Set("reduceOnly", "true")
+	}
+	if req.ClosePosition {
+		params.Set("closePosition", "true")
+	}
+	if req.ActivationPrice != "" {
+		params.Set("activationPrice", req.ActivationPrice)
+	}
+	if req.CallbackRate != "" {
+		params.Set("callbackRate", req.CallbackRate)
+	}
+	data, err := t.signedRequest(context.Background(), http.MethodPost, "/fapi/v1/algo/order", params, true)
+	if err != nil {
+		return nil, err
+	}
+	var resp ConditionalOrderResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, err
+	}
+	if resp.ErrorCode != 0 && resp.ErrorCode != 200 {
+		return nil, fmt.Errorf("binance algo order error %d: %s", resp.ErrorCode, resp.Message)
+	}
+	return &resp, nil
+}
+
+func (t *FuturesTrader) QueryConditionalOrder(algoID int64, clientAlgoID string) (*ConditionalOrderResponse, error) {
+	params := url.Values{}
+	if algoID > 0 {
+		params.Set("algoId", strconv.FormatInt(algoID, 10))
+	}
+	if clientAlgoID != "" {
+		params.Set("clientAlgoId", clientAlgoID)
+	}
+	if len(params) == 0 {
+		return nil, fmt.Errorf("algoId or clientAlgoId required")
+	}
+	data, err := t.signedRequest(context.Background(), http.MethodGet, "/fapi/v1/algo/order", params, false)
+	if err != nil {
+		return nil, err
+	}
+	var resp ConditionalOrderResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+func (t *FuturesTrader) CancelConditionalOrder(algoID int64, clientAlgoID string) error {
+	params := url.Values{}
+	if algoID > 0 {
+		params.Set("algoId", strconv.FormatInt(algoID, 10))
+	}
+	if clientAlgoID != "" {
+		params.Set("clientAlgoId", clientAlgoID)
+	}
+	if len(params) == 0 {
+		return fmt.Errorf("algoId or clientAlgoId required")
+	}
+	_, err := t.signedRequest(context.Background(), http.MethodDelete, "/fapi/v1/algo/order", params, false)
+	return err
+}
+
+func (t *FuturesTrader) CancelAllConditionalOrders(symbol string) error {
+	if strings.TrimSpace(symbol) == "" {
+		return fmt.Errorf("symbol required")
+	}
+	params := url.Values{}
+	params.Set("symbol", strings.ToUpper(symbol))
+	_, err := t.signedRequest(context.Background(), http.MethodDelete, "/fapi/v1/algoOpenOrders", params, false)
+	return err
+}
+
+func (t *FuturesTrader) signedRequest(ctx context.Context, method, endpoint string, params url.Values, includeBody bool) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if params == nil {
+		params = url.Values{}
+	}
+	if params.Get("recvWindow") == "" {
+		params.Set("recvWindow", "5000")
+	}
+	timestamp := time.Now().UnixMilli() - t.client.TimeOffset
+	params.Set("timestamp", strconv.FormatInt(timestamp, 10))
+	bodyString := ""
+	queryString := ""
+	if includeBody {
+		bodyString = params.Encode()
+	} else {
+		queryString = params.Encode()
+	}
+	keyType := t.client.KeyType
+	if keyType == "" {
+		keyType = common.KeyTypeHmac
+	}
+	sf, err := common.SignFunc(keyType)
+	if err != nil {
+		return nil, err
+	}
+	raw := queryString + bodyString
+	signature, err := sf(t.client.SecretKey, raw)
+	if err != nil {
+		return nil, err
+	}
+	sigParam := url.Values{}
+	sigParam.Set("signature", *signature)
+	if queryString == "" {
+		queryString = sigParam.Encode()
+	} else {
+		queryString = queryString + "&" + sigParam.Encode()
+	}
+	baseURL := t.client.BaseURL
+	if baseURL == "" {
+		baseURL = futures.BaseApiMainUrl
+	}
+	fullURL := fmt.Sprintf("%s%s", baseURL, endpoint)
+	if queryString != "" {
+		fullURL = fmt.Sprintf("%s?%s", fullURL, queryString)
+	}
+	var body io.Reader
+	if includeBody {
+		body = strings.NewReader(bodyString)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, fullURL, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-MBX-APIKEY", t.client.APIKey)
+	if includeBody {
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	}
+	client := t.client.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= http.StatusBadRequest {
+		apiErr := &common.APIError{}
+		if e := json.Unmarshal(data, apiErr); e == nil && apiErr.Code != 0 {
+			return nil, apiErr
+		}
+		return nil, fmt.Errorf("binance api error: %s", string(data))
+	}
+	return data, nil
 }
 
 // 辅助函数

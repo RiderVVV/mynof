@@ -11,6 +11,11 @@ export interface SystemStatus {
   stop_until: string;
   last_reset_time: string;
   ai_provider: string;
+  entry_mode?: string;
+  entry_working_type?: string;
+  entry_price_protect?: boolean;
+  entry_timeout_minutes?: number;
+  pending_entries?: PendingEntry[];
 }
 
 export interface AccountInfo {
@@ -51,6 +56,28 @@ export interface DecisionAction {
   timestamp: string;
   success: boolean;
   error?: string;
+  entry_type?: string;
+  entry_price?: number;
+  entry_algo_id?: number;
+  entry_client_algo_id?: string;
+  entry_status?: string;
+}
+
+export interface PendingEntry {
+  symbol: string;
+  side: string;
+  algo_id: number;
+  client_algo_id: string;
+  order_type: string;
+  trigger_price?: number;
+  limit_price?: number;
+  quantity: number;
+  status?: string;
+  created_at?: string;
+  expires_at?: string;
+  working_type?: string;
+  price_protect?: boolean;
+  min_hold_minutes?: number;
 }
 
 export interface AccountSnapshot {

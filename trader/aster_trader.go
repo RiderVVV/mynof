@@ -27,8 +27,8 @@ import (
 // AsterTrader Aster交易平台实现
 type AsterTrader struct {
 	ctx        context.Context
-	user       string           // 主钱包地址 (ERC20)
-	signer     string           // API钱包地址
+	user       string            // 主钱包地址 (ERC20)
+	signer     string            // API钱包地址
 	privateKey *ecdsa.PrivateKey // API钱包私钥
 	client     *http.Client
 	baseURL    string
@@ -99,9 +99,9 @@ func (t *AsterTrader) getPrecision(symbol string) (SymbolPrecision, error) {
 	body, _ := io.ReadAll(resp.Body)
 	var info struct {
 		Symbols []struct {
-			Symbol            string `json:"symbol"`
-			PricePrecision    int    `json:"pricePrecision"`
-			QuantityPrecision int    `json:"quantityPrecision"`
+			Symbol            string                   `json:"symbol"`
+			PricePrecision    int                      `json:"pricePrecision"`
+			QuantityPrecision int                      `json:"quantityPrecision"`
 			Filters           []map[string]interface{} `json:"filters"`
 		} `json:"symbols"`
 	}
@@ -506,14 +506,14 @@ func (t *AsterTrader) GetPositions() ([]map[string]interface{}, error) {
 
 		// 返回与Binance相同的字段名
 		result = append(result, map[string]interface{}{
-			"symbol":            pos["symbol"],
-			"side":              side,
-			"positionAmt":       posAmt,
-			"entryPrice":        entryPrice,
-			"markPrice":         markPrice,
-			"unRealizedProfit":  unRealizedProfit,
-			"leverage":          leverageVal,
-			"liquidationPrice":  liquidationPrice,
+			"symbol":           pos["symbol"],
+			"side":             side,
+			"positionAmt":      posAmt,
+			"entryPrice":       entryPrice,
+			"markPrice":        markPrice,
+			"unRealizedProfit": unRealizedProfit,
+			"leverage":         leverageVal,
+			"liquidationPrice": liquidationPrice,
 		})
 	}
 
@@ -956,4 +956,20 @@ func (t *AsterTrader) FormatQuantity(symbol string, quantity float64) (string, e
 		return "", err
 	}
 	return fmt.Sprintf("%v", formatted), nil
+}
+
+func (t *AsterTrader) PlaceConditionalOrder(req *ConditionalOrderRequest) (*ConditionalOrderResponse, error) {
+	return nil, ErrConditionalOrdersUnsupported
+}
+
+func (t *AsterTrader) QueryConditionalOrder(algoID int64, clientAlgoID string) (*ConditionalOrderResponse, error) {
+	return nil, ErrConditionalOrdersUnsupported
+}
+
+func (t *AsterTrader) CancelConditionalOrder(algoID int64, clientAlgoID string) error {
+	return ErrConditionalOrdersUnsupported
+}
+
+func (t *AsterTrader) CancelAllConditionalOrders(symbol string) error {
+	return ErrConditionalOrdersUnsupported
 }

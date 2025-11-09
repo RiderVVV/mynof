@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/adshao/go-binance/v2/futures"
 )
 
 // EnsembleModelConfig 辅助模型配置
@@ -95,6 +97,12 @@ type TraderConfig struct {
 	SimpleTrailingFeePct       float64 `json:"simple_trailing_fee_pct,omitempty"`
 	RiskReviewEnabled          *bool   `json:"risk_review_enabled,omitempty"`
 	GuardrailStrict            bool    `json:"guardrail_strict,omitempty"`
+
+	EntryMode           string  `json:"entry_mode,omitempty"`
+	EntryWorkingType    string  `json:"entry_working_type,omitempty"`
+	EntryTimeoutMinutes int     `json:"entry_timeout_minutes,omitempty"`
+	EntryBufferPct      float64 `json:"entry_buffer_pct,omitempty"`
+	EntryPriceProtect   bool    `json:"entry_price_protect,omitempty"`
 }
 
 // LeverageConfig 杠杆配置
@@ -227,6 +235,29 @@ func (c *Config) Validate() error {
 		if trader.MaxTradeRiskUSD < 0 {
 			return fmt.Errorf("trader[%d]: max_trade_risk_usd 不能为负", i)
 		}
+
+		entryMode := strings.ToLower(strings.TrimSpace(trader.EntryMode))
+		if entryMode == "" {
+			entryMode = "market"
+		}
+		if entryMode != "market" && entryMode != "conditional" {
+			return fmt.Errorf("trader[%d]: entry_mode 仅支持 'market' 或 'conditional'", i)
+		}
+		if entryMode == "conditional" && trader.Exchange != "binance" {
+			return fmt.Errorf("trader[%d]: entry_mode=conditional 仅支持币安交易所", i)
+		}
+		if trader.EntryTimeoutMinutes < 0 {
+			return fmt.Errorf("trader[%d]: entry_timeout_minutes 不能为负", i)
+		}
+		if trader.EntryBufferPct < 0 {
+			return fmt.Errorf("trader[%d]: entry_buffer_pct 不能为负", i)
+		}
+		if trader.EntryWorkingType != "" {
+			wt := strings.ToUpper(strings.TrimSpace(trader.EntryWorkingType))
+			if wt != string(futures.WorkingTypeContractPrice) && wt != string(futures.WorkingTypeMarkPrice) {
+				return fmt.Errorf("trader[%d]: entry_working_type 仅支持 CONTRACT_PRICE 或 MARK_PRICE", i)
+			}
+		}
 		if trader.TradingWindow.StartHour < 0 || trader.TradingWindow.StartHour > 23 {
 			return fmt.Errorf("trader[%d]: trading_window.start_hour 需在0-23之间", i)
 		}
@@ -320,4 +351,44 @@ func (tc *TraderConfig) GetGuardInterval() time.Duration {
 		return time.Minute
 	}
 	return time.Duration(tc.GuardIntervalMinutes) * time.Minute
+}
+
+// GetEntryMode 返回清洗后的下单模式
+func (tc *TraderConfig) GetEntryMode() string {
+	mode := strings.ToLower(strings.TrimSpace(tc.EntryMode))
+	if mode == "conditional" {
+		return "conditional"
+	}
+	return "market"
+}
+
+// GetEntryWorkingType 返回触发价使用的价格类型
+func (tc *TraderConfig) GetEntryWorkingType() string {
+	working := strings.ToUpper(strings.TrimSpace(tc.EntryWorkingType))
+	if working == string(futures.WorkingTypeMarkPrice) {
+		return string(futures.WorkingTypeMarkPrice)
+	}
+	return string(futures.WorkingTypeContractPrice)
+}
+
+// GetEntryTimeout 返回条件单默认超时时间
+func (tc *TraderConfig) GetEntryTimeout() time.Duration {
+	minutes := tc.EntryTimeoutMinutes
+	if minutes <= 0 {
+		minutes = 30
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
+// GetEntryBufferPct 返回条件单触发价缓冲
+func (tc *TraderConfig) GetEntryBufferPct() float64 {
+	if tc.EntryBufferPct < 0 {
+		return 0
+	}
+	return tc.EntryBufferPct
+}
+
+// EntryPriceProtectionEnabled 是否启用触发价保护
+func (tc *TraderConfig) EntryPriceProtectionEnabled() bool {
+	return tc.EntryPriceProtect
 }

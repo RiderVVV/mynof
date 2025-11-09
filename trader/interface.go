@@ -1,5 +1,7 @@
 package trader
 
+import "errors"
+
 // Trader 交易器统一接口
 // 支持多个交易平台（币安、Hyperliquid等）
 type Trader interface {
@@ -38,4 +40,19 @@ type Trader interface {
 
 	// FormatQuantity 格式化数量到正确的精度
 	FormatQuantity(symbol string, quantity float64) (string, error)
+
+	// PlaceConditionalOrder 使用交易所条件单接口（若支持）
+	PlaceConditionalOrder(req *ConditionalOrderRequest) (*ConditionalOrderResponse, error)
+
+	// QueryConditionalOrder 查询指定条件单状态
+	QueryConditionalOrder(algoID int64, clientAlgoID string) (*ConditionalOrderResponse, error)
+
+	// CancelConditionalOrder 取消指定条件单
+	CancelConditionalOrder(algoID int64, clientAlgoID string) error
+
+	// CancelAllConditionalOrders 取消某交易对下所有条件单
+	CancelAllConditionalOrders(symbol string) error
 }
+
+// ErrConditionalOrdersUnsupported 表示交易器未实现条件单接口
+var ErrConditionalOrdersUnsupported = errors.New("conditional orders are not supported by this trader")

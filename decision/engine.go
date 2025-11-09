@@ -42,6 +42,21 @@ type PositionInfo struct {
 	UpdateTime                  int64   `json:"update_time"` // 持仓更新时间戳（毫秒）
 }
 
+// PendingEntry 描述尚未触发的条件单
+type PendingEntry struct {
+	Symbol       string  `json:"symbol"`
+	Side         string  `json:"side"`
+	OrderType    string  `json:"order_type"`
+	Quantity     float64 `json:"quantity"`
+	TriggerPrice float64 `json:"trigger_price,omitempty"`
+	LimitPrice   float64 `json:"limit_price,omitempty"`
+	Status       string  `json:"status,omitempty"`
+	CreatedAt    string  `json:"created_at,omitempty"`
+	ExpiresAt    string  `json:"expires_at,omitempty"`
+	WorkingType  string  `json:"working_type,omitempty"`
+	PriceProtect bool    `json:"price_protect,omitempty"`
+}
+
 // AccountInfo 账户信息
 type AccountInfo struct {
 	TotalEquity      float64 `json:"total_equity"`      // 账户净值
@@ -91,6 +106,7 @@ type Context struct {
 	EnsembleSummary  string                   `json:"-"`
 	RecentRiskAlerts []RiskFlag               `json:"-"`
 	RecentGuardrails []MarketGuardrailWarning `json:"-"`
+	PendingEntries   []PendingEntry           `json:"pending_entries,omitempty"`
 }
 
 // AuxConsensus 描述辅助模型之间的总体意见
@@ -195,6 +211,14 @@ type Decision struct {
 	Confidence        int                `json:"confidence,omitempty"` // 信心度 (0-100)
 	RiskUSD           float64            `json:"risk_usd,omitempty"`   // 最大美元风险
 	Reasoning         string             `json:"reasoning"`
+	EntryType         string             `json:"entry_type,omitempty"`
+	EntryPrice        float64            `json:"entry_price,omitempty"`
+	EntryLimitPrice   float64            `json:"entry_limit_price,omitempty"`
+	EntryActivation   float64            `json:"entry_activation_price,omitempty"`
+	EntryCallbackRate float64            `json:"entry_callback_rate,omitempty"`
+	EntryTimeoutMins  int                `json:"entry_timeout_minutes,omitempty"`
+	EntryWorkingType  string             `json:"entry_working_type,omitempty"`
+	EntryPriceProtect *bool              `json:"entry_price_protect,omitempty"`
 }
 
 type decisionAlias Decision
@@ -871,6 +895,7 @@ type promptSnapshot struct {
 	AuxOpinions       []promptAuxOpinion       `json:"auxiliary_opinions,omitempty"`
 	AuxConsensus      *promptAuxConsensus      `json:"auxiliary_consensus,omitempty"`
 	EnsembleMeta      *promptEnsembleMeta      `json:"ensemble_meta,omitempty"`
+	PendingEntries    []PendingEntry           `json:"pending_entries,omitempty"`
 }
 
 func buildPromptSnapshot(ctx *Context) promptSnapshot {
@@ -1000,6 +1025,7 @@ func buildPromptSnapshot(ctx *Context) promptSnapshot {
 		AuxOpinions:       buildAuxOpinionsSnapshot(ctx),
 		AuxConsensus:      buildAuxConsensusSnapshot(ctx),
 		EnsembleMeta:      ensembleMeta,
+		PendingEntries:    ctx.PendingEntries,
 	}
 }
 
@@ -2097,6 +2123,15 @@ func collapseUnderscores(s string) string {
 	return strings.Trim(b.String(), "_")
 }
 
+func isSupportedEntryType(entryType string) bool {
+	switch strings.ToLower(strings.TrimSpace(entryType)) {
+	case "stop", "stop_market", "take_profit", "take_profit_market", "trailing_stop_market":
+		return true
+	default:
+		return false
+	}
+}
+
 // validateDecision 验证单个决策的有效性
 func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoinLeverage int) error {
 	strategyHint, ok := normalizeStrategyHint(d.StrategyHint)
@@ -2186,6 +2221,36 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 
 			if totalFraction > 1.02 {
 				return fmt.Errorf("tp_targets 分配比例合计%.1f%%，不得超过100%%", totalFraction*100)
+			}
+		}
+
+		if strings.TrimSpace(d.EntryType) != "" {
+			if !isSupportedEntryType(d.EntryType) {
+				return fmt.Errorf("entry_type 不支持: %s", d.EntryType)
+			}
+			lowerType := strings.ToLower(strings.TrimSpace(d.EntryType))
+			switch lowerType {
+			case "trailing_stop_market":
+				if d.EntryCallbackRate <= 0 {
+					return fmt.Errorf("entry_type=trailing_stop_market 需要 entry_callback_rate")
+				}
+				if d.EntryActivation <= 0 {
+					return fmt.Errorf("entry_type=trailing_stop_market 需要 entry_activation_price")
+				}
+			default:
+				if d.EntryPrice <= 0 {
+					return fmt.Errorf("entry_type=%s 需要 entry_price", d.EntryType)
+				}
+			}
+		}
+
+		if d.EntryTimeoutMins < 0 {
+			return fmt.Errorf("entry_timeout_minutes 不能为负")
+		}
+		if strings.TrimSpace(d.EntryWorkingType) != "" {
+			wt := strings.ToUpper(strings.TrimSpace(d.EntryWorkingType))
+			if wt != "CONTRACT_PRICE" && wt != "MARK_PRICE" {
+				return fmt.Errorf("entry_working_type 仅支持 CONTRACT_PRICE 或 MARK_PRICE")
 			}
 		}
 

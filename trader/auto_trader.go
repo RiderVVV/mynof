@@ -2,6 +2,7 @@ package trader
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -15,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/adshao/go-binance/v2/futures"
 )
 
 const (
@@ -96,6 +99,12 @@ type AutoTraderConfig struct {
 	SimpleTrailingFeePct       float64 // 回本所需收益阈值（默认0.03%即万五*2）
 	RiskReviewEnabled          bool    // 是否启用AI风控复核
 	GuardrailStrict            bool    // 守护告警是否硬拒绝
+
+	EntryMode         string        // entry execution mode: market | conditional
+	EntryWorkingType  string        // MARK_PRICE / CONTRACT_PRICE
+	EntryTimeout      time.Duration // default conditional order timeout
+	EntryBufferPct    float64       // optional trigger buffer ratio
+	EntryPriceProtect bool          // enable priceProtect flag when supported
 }
 
 // EnsembleModelConfig 定义辅助模型的API参数
@@ -138,6 +147,9 @@ const (
 	minCloseHoldMinutes                = 10
 	minClosePnLPct                     = 0.2
 	rangeMidAtrBumpRatio               = 0.5
+	defaultConditionalEntryTimeout     = 30 * time.Minute
+	entryModeMarket                    = "market"
+	entryModeConditional               = "conditional"
 )
 
 type positionTargetState struct {
@@ -164,6 +176,28 @@ type majorEventWindow struct {
 	Name  string
 	Start time.Time
 	End   time.Time
+}
+
+type pendingEntry struct {
+	Symbol            string
+	Side              string
+	AlgoID            int64
+	ClientAlgoID      string
+	OrderType         string
+	TriggerPrice      float64
+	LimitPrice        float64
+	Quantity          float64
+	StopLoss          float64
+	TakeProfit        float64
+	TakeProfitTargets []decision.TakeProfitTarget
+	DecisionSnapshot  *decision.Decision
+	GuardStrategy     string
+	MinHoldDuration   time.Duration
+	CreatedAt         time.Time
+	ExpiresAt         time.Time
+	WorkingType       string
+	PriceProtect      bool
+	Status            string
 }
 
 // AutoTrader 自动交易器
@@ -200,6 +234,12 @@ type AutoTrader struct {
 	tradingWindow         config.TradingWindowConfig
 	majorEvents           []majorEventWindow
 	guardrailStrict       bool
+	entryMode             string
+	entryWorkingType      string
+	entryTimeout          time.Duration
+	entryBufferPct        float64
+	entryPriceProtect     bool
+	pendingEntries        map[string]*pendingEntry
 }
 
 type profitProtectionThresholds struct {
@@ -295,6 +335,27 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 
 	if config.GuardInterval <= 0 {
 		config.GuardInterval = time.Minute
+	}
+
+	entryMode := entryModeMarket
+	if strings.EqualFold(config.EntryMode, entryModeConditional) {
+		if strings.EqualFold(config.Exchange, "binance") {
+			entryMode = entryModeConditional
+		} else {
+			log.Printf("⚠️ [%s] entry_mode=conditional 仅支持币安，已回退至市价单模式", config.Name)
+		}
+	}
+	entryWorkingType := strings.ToUpper(strings.TrimSpace(config.EntryWorkingType))
+	if entryWorkingType != string(futures.WorkingTypeMarkPrice) {
+		entryWorkingType = string(futures.WorkingTypeContractPrice)
+	}
+	entryTimeout := config.EntryTimeout
+	if entryTimeout <= 0 {
+		entryTimeout = defaultConditionalEntryTimeout
+	}
+	entryBuffer := config.EntryBufferPct
+	if entryBuffer < 0 {
+		entryBuffer = 0
 	}
 
 	ensembleMode := strings.TrimSpace(config.EnsembleMode)
@@ -393,6 +454,12 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 		tradingWindow:         config.TradingWindow,
 		majorEvents:           majorEvents,
 		guardrailStrict:       config.GuardrailStrict,
+		entryMode:             entryMode,
+		entryWorkingType:      entryWorkingType,
+		entryTimeout:          entryTimeout,
+		entryBufferPct:        entryBuffer,
+		entryPriceProtect:     config.EntryPriceProtect,
+		pendingEntries:        make(map[string]*pendingEntry),
 	}
 	if result.config.SimpleTrailingFeePct <= 0 {
 		result.config.SimpleTrailingFeePct = simpleTrailingDefaultFeePct
@@ -536,6 +603,7 @@ func (at *AutoTrader) runGuardCycle() error {
 		InputPrompt:  "guard_cycle",
 	}
 	at.populateRecordFromContext(record, ctx)
+	at.syncPendingEntries(record)
 
 	if handled, err := at.applyProfitProtection(ctx, record); err != nil {
 		return fmt.Errorf("守护巡检执行盈利保护失败: %w", err)
@@ -589,6 +657,7 @@ func (at *AutoTrader) runCycle() error {
 	}
 
 	at.populateRecordFromContext(record, ctx)
+	at.syncPendingEntries(record)
 
 	log.Printf("📊 账户净值: %.2f USDT | 可用: %.2f USDT | 持仓: %d",
 		ctx.Account.TotalEquity, ctx.Account.AvailableBalance, ctx.Account.PositionCount)
@@ -833,6 +902,120 @@ func (at *AutoTrader) runCycle() error {
 		log.Printf("⚠ 保存决策记录失败: %v", err)
 	}
 
+	return nil
+}
+
+func (at *AutoTrader) syncPendingEntries(record *logger.DecisionRecord) {
+	if len(at.pendingEntries) == 0 || at.trader == nil {
+		return
+	}
+	now := time.Now()
+	for key, entry := range at.pendingEntries {
+		resp, err := at.trader.QueryConditionalOrder(entry.AlgoID, entry.ClientAlgoID)
+		if err != nil {
+			log.Printf("⚠️ 查询条件单状态失败 (%s): %v", entry.Symbol, err)
+			if now.After(entry.ExpiresAt) {
+				if cancelErr := at.trader.CancelConditionalOrder(entry.AlgoID, entry.ClientAlgoID); cancelErr != nil {
+					log.Printf("⚠️ 取消过期条件单失败 (%s): %v", entry.Symbol, cancelErr)
+				} else if record != nil {
+					record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("条件单超时已撤销 %s (%s)", entry.Symbol, entry.Side))
+				}
+				delete(at.pendingEntries, key)
+			}
+			continue
+		}
+		if resp != nil {
+			status := strings.ToUpper(resp.AlgoStatus)
+			if status == "" {
+				status = entry.Status
+			}
+			entry.Status = status
+			if entry.TriggerPrice == 0 {
+				if val, err := strconv.ParseFloat(resp.TriggerPrice, 64); err == nil {
+					entry.TriggerPrice = val
+				}
+			}
+		}
+		switch entry.Status {
+		case "TRIGGERED", "FILLED", "FINISHED", "CALCULATED":
+			if err := at.onPendingEntryTriggered(entry, record); err != nil {
+				log.Printf("❌ 条件单触发后处理失败 (%s): %v", entry.Symbol, err)
+			}
+			delete(at.pendingEntries, key)
+		case "CANCELED", "EXPIRED", "REJECTED":
+			log.Printf("⚠️ 条件单已结束 (%s): status=%s", entry.Symbol, entry.Status)
+			if record != nil {
+				record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("条件单结束 %s (%s): %s", entry.Symbol, entry.Side, entry.Status))
+			}
+			delete(at.pendingEntries, key)
+		default:
+			if now.After(entry.ExpiresAt) {
+				if cancelErr := at.trader.CancelConditionalOrder(entry.AlgoID, entry.ClientAlgoID); cancelErr != nil {
+					log.Printf("⚠️ 取消过期条件单失败 (%s): %v", entry.Symbol, cancelErr)
+				} else if record != nil {
+					record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("条件单超时已撤销 %s (%s)", entry.Symbol, entry.Side))
+				}
+				delete(at.pendingEntries, key)
+			}
+		}
+	}
+}
+
+func (at *AutoTrader) onPendingEntryTriggered(entry *pendingEntry, record *logger.DecisionRecord) error {
+	if entry == nil {
+		return nil
+	}
+	positions, err := at.trader.GetPositions()
+	if err != nil {
+		return err
+	}
+	var filledQty float64
+	symbol := strings.ToUpper(entry.Symbol)
+	for _, pos := range positions {
+		posSymbol, _ := pos["symbol"].(string)
+		if strings.ToUpper(posSymbol) != symbol {
+			continue
+		}
+		side, _ := pos["side"].(string)
+		if !strings.EqualFold(side, entry.Side) {
+			continue
+		}
+		if amt, ok := pos["positionAmt"].(float64); ok {
+			filledQty = math.Abs(amt)
+		}
+		break
+	}
+	if filledQty <= 0 {
+		filledQty = entry.Quantity
+	}
+	posKey := positionKey(entry.Symbol, entry.Side)
+	at.positionFirstSeenTime[posKey] = time.Now().UnixMilli()
+	at.positionMinHoldUntil[posKey] = time.Now().Add(entry.MinHoldDuration)
+	if entry.GuardStrategy != "" {
+		at.positionGuardStrategy[posKey] = entry.GuardStrategy
+	}
+	if entry.DecisionSnapshot != nil && len(entry.TakeProfitTargets) > 0 {
+		clone := cloneDecision(entry.DecisionSnapshot)
+		clone.TakeProfitTargets = append([]decision.TakeProfitTarget(nil), entry.TakeProfitTargets...)
+		at.registerPositionTargets(clone, filledQty, entry.TriggerPrice, entry.Side)
+	} else {
+		delete(at.positionTargets, posKey)
+	}
+	posSide := toPositionSide(entry.Side)
+	if entry.StopLoss > 0 {
+		if err := at.trader.SetStopLoss(entry.Symbol, posSide, filledQty, entry.StopLoss); err != nil {
+			log.Printf("⚠️ 条件单触发后设置止损失败 (%s): %v", entry.Symbol, err)
+		}
+	}
+	if entry.TakeProfit > 0 && len(entry.TakeProfitTargets) == 0 {
+		if err := at.trader.SetTakeProfit(entry.Symbol, posSide, filledQty, entry.TakeProfit); err != nil {
+			log.Printf("⚠️ 条件单触发后设置止盈失败 (%s): %v", entry.Symbol, err)
+		}
+	}
+	log.Printf("  ✅ 条件单已触发并建仓: %s %s (algoId=%d, qty=%.4f)", entry.Symbol, entry.Side, entry.AlgoID, filledQty)
+	if record != nil {
+		record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("条件单触发: %s %s (algoId=%d)", entry.Symbol, entry.Side, entry.AlgoID))
+	}
 	return nil
 }
 
@@ -1246,6 +1429,7 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		RecentRiskAlerts: recentRiskAlerts,
 		RecentGuardrails: recentGuardrails,
 	}
+	ctx.PendingEntries = at.collectPendingEntriesForContext()
 
 	perfState, cooling := derivePerformanceCoolingState(performance, riskBudget, recentRiskUsage)
 	ctx.PerformanceState = perfState
@@ -2191,6 +2375,165 @@ func (at *AutoTrader) registerPositionTargets(decision *decision.Decision, quant
 	}
 }
 
+func (at *AutoTrader) conditionalEntriesEnabled() bool {
+	return at.entryMode == entryModeConditional
+}
+
+func (at *AutoTrader) resolveEntryWorkingType(decision *decision.Decision) string {
+	if decision != nil {
+		if wt := strings.ToUpper(strings.TrimSpace(decision.EntryWorkingType)); wt == string(futures.WorkingTypeMarkPrice) {
+			return wt
+		}
+	}
+	return at.entryWorkingType
+}
+
+func (at *AutoTrader) resolveEntryTimeout(decision *decision.Decision) time.Duration {
+	if decision != nil && decision.EntryTimeoutMins > 0 {
+		return time.Duration(decision.EntryTimeoutMins) * time.Minute
+	}
+	if at.entryTimeout > 0 {
+		return at.entryTimeout
+	}
+	return defaultConditionalEntryTimeout
+}
+
+func (at *AutoTrader) resolveEntryPriceProtect(decision *decision.Decision) bool {
+	if decision != nil && decision.EntryPriceProtect != nil {
+		return *decision.EntryPriceProtect
+	}
+	return at.entryPriceProtect
+}
+
+func normalizeConditionalOrderType(entryType string) (futures.OrderType, bool) {
+	switch strings.ToLower(strings.TrimSpace(entryType)) {
+	case "stop", "stop_limit":
+		return futures.OrderTypeStop, true
+	case "stop_market":
+		return futures.OrderTypeStopMarket, true
+	case "take_profit":
+		return futures.OrderTypeTakeProfit, true
+	case "take_profit_market":
+		return futures.OrderTypeTakeProfitMarket, true
+	case "trailing_stop_market":
+		return futures.OrderTypeTrailingStopMarket, true
+	default:
+		return "", false
+	}
+}
+
+func positionKey(symbol, side string) string {
+	return strings.ToUpper(strings.TrimSpace(symbol)) + "_" + strings.ToLower(strings.TrimSpace(side))
+}
+
+func cloneDecision(src *decision.Decision) *decision.Decision {
+	if src == nil {
+		return nil
+	}
+	clone := *src
+	clone.TakeProfitTargets = cloneTakeProfitTargets(src.TakeProfitTargets)
+	return &clone
+}
+
+func cloneTakeProfitTargets(src []decision.TakeProfitTarget) []decision.TakeProfitTarget {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make([]decision.TakeProfitTarget, len(src))
+	copy(out, src)
+	return out
+}
+
+func toPositionSide(side string) string {
+	if strings.EqualFold(side, "long") {
+		return "LONG"
+	}
+	return "SHORT"
+}
+
+func formatPriceString(value float64) string {
+	if value == 0 {
+		return ""
+	}
+	return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.8f", value), "0"), ".")
+}
+
+func (at *AutoTrader) snapshotPendingEntries() []map[string]interface{} {
+	if len(at.pendingEntries) == 0 {
+		return nil
+	}
+	items := make([]map[string]interface{}, 0, len(at.pendingEntries))
+	for _, entry := range at.pendingEntries {
+		items = append(items, map[string]interface{}{
+			"symbol":           entry.Symbol,
+			"side":             entry.Side,
+			"algo_id":          entry.AlgoID,
+			"client_algo_id":   entry.ClientAlgoID,
+			"order_type":       entry.OrderType,
+			"trigger_price":    entry.TriggerPrice,
+			"limit_price":      entry.LimitPrice,
+			"quantity":         entry.Quantity,
+			"status":           entry.Status,
+			"created_at":       entry.CreatedAt.Format(time.RFC3339),
+			"expires_at":       entry.ExpiresAt.Format(time.RFC3339),
+			"working_type":     entry.WorkingType,
+			"price_protect":    entry.PriceProtect,
+			"min_hold_minutes": entry.MinHoldDuration.Minutes(),
+		})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return items[i]["created_at"].(string) < items[j]["created_at"].(string)
+	})
+	return items
+}
+
+func (at *AutoTrader) collectPendingEntriesForContext() []decision.PendingEntry {
+	if len(at.pendingEntries) == 0 {
+		return nil
+	}
+	items := make([]decision.PendingEntry, 0, len(at.pendingEntries))
+	for _, entry := range at.pendingEntries {
+		items = append(items, decision.PendingEntry{
+			Symbol:       entry.Symbol,
+			Side:         entry.Side,
+			OrderType:    entry.OrderType,
+			Quantity:     entry.Quantity,
+			TriggerPrice: entry.TriggerPrice,
+			LimitPrice:   entry.LimitPrice,
+			Status:       entry.Status,
+			CreatedAt:    entry.CreatedAt.Format(time.RFC3339),
+			ExpiresAt:    entry.ExpiresAt.Format(time.RFC3339),
+			WorkingType:  entry.WorkingType,
+			PriceProtect: entry.PriceProtect,
+		})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].CreatedAt < items[j].CreatedAt
+	})
+	return items
+}
+
+func (at *AutoTrader) shouldUseConditionalEntry(decision *decision.Decision) (futures.OrderType, bool) {
+	if decision == nil || !at.conditionalEntriesEnabled() {
+		return "", false
+	}
+	orderType, ok := normalizeConditionalOrderType(decision.EntryType)
+	if !ok {
+		return "", false
+	}
+	switch orderType {
+	case futures.OrderTypeTrailingStopMarket:
+		if decision.EntryActivation <= 0 || decision.EntryCallbackRate <= 0 {
+			return "", false
+		}
+	default:
+		if decision.EntryPrice <= 0 {
+			return "", false
+		}
+	}
+	return orderType, true
+}
+
 func (at *AutoTrader) adjustTargetPriceForRange(symbol, side, strategy string, price float64, data *market.Data) float64 {
 	if price <= 0 || data == nil || data.RangeState == nil {
 		return price
@@ -3108,6 +3451,100 @@ func (at *AutoTrader) executeDecisionWithRecord(decision *decision.Decision, act
 	}
 }
 
+func (at *AutoTrader) placeConditionalOpen(plan *decision.Decision, actionRecord *logger.DecisionAction, quantity float64, orderType futures.OrderType, side futures.SideType, positionSide futures.PositionSideType, minHoldDuration time.Duration, guardStrategy string) error {
+	if plan == nil {
+		return fmt.Errorf("decision is nil")
+	}
+	quantityStr, err := at.trader.FormatQuantity(plan.Symbol, quantity)
+	if err != nil {
+		return err
+	}
+	workingType := futures.WorkingType(at.resolveEntryWorkingType(plan))
+	req := &ConditionalOrderRequest{
+		Symbol:       market.Normalize(plan.Symbol),
+		Side:         side,
+		PositionSide: positionSide,
+		OrderType:    orderType,
+		TimeInForce:  futures.TimeInForceTypeGTC,
+		Quantity:     quantityStr,
+		WorkingType:  workingType,
+		ClientAlgoID: fmt.Sprintf("nofx-%s-%d", strings.ToLower(plan.Symbol), time.Now().UnixNano()),
+		PriceProtect: at.resolveEntryPriceProtect(plan),
+	}
+	switch orderType {
+	case futures.OrderTypeTrailingStopMarket:
+		req.ActivationPrice = formatPriceString(plan.EntryActivation)
+		req.CallbackRate = formatPriceString(plan.EntryCallbackRate)
+	default:
+		req.TriggerPrice = formatPriceString(plan.EntryPrice)
+		limitPrice := plan.EntryLimitPrice
+		if limitPrice <= 0 {
+			limitPrice = plan.EntryPrice
+		}
+		if orderType == futures.OrderTypeStop || orderType == futures.OrderTypeTakeProfit {
+			req.Price = formatPriceString(limitPrice)
+		}
+	}
+	resp, err := at.trader.PlaceConditionalOrder(req)
+	if err != nil {
+		return err
+	}
+	key := positionKey(plan.Symbol, strings.ToLower(string(positionSide)))
+	triggerValue := plan.EntryPrice
+	if orderType == futures.OrderTypeTrailingStopMarket && plan.EntryActivation > 0 {
+		triggerValue = plan.EntryActivation
+	}
+	orderTypeLabel := resp.OrderType
+	if orderTypeLabel == "" {
+		orderTypeLabel = string(orderType)
+	}
+	snapshot := cloneDecision(plan)
+	var tpTargets []decision.TakeProfitTarget
+	if snapshot != nil {
+		tpTargets = cloneTakeProfitTargets(snapshot.TakeProfitTargets)
+	}
+	entry := &pendingEntry{
+		Symbol:            market.Normalize(plan.Symbol),
+		Side:              strings.ToLower(string(positionSide)),
+		AlgoID:            resp.AlgoID,
+		ClientAlgoID:      resp.ClientAlgoID,
+		OrderType:         orderTypeLabel,
+		TriggerPrice:      triggerValue,
+		LimitPrice:        plan.EntryLimitPrice,
+		Quantity:          quantity,
+		StopLoss:          plan.StopLoss,
+		TakeProfit:        plan.TakeProfit,
+		TakeProfitTargets: tpTargets,
+		DecisionSnapshot:  snapshot,
+		GuardStrategy:     guardStrategy,
+		MinHoldDuration:   minHoldDuration,
+		CreatedAt:         time.Now(),
+		ExpiresAt:         time.Now().Add(at.resolveEntryTimeout(plan)),
+		WorkingType:       string(workingType),
+		PriceProtect:      at.resolveEntryPriceProtect(plan),
+		Status:            resp.AlgoStatus,
+	}
+	at.pendingEntries[key] = entry
+
+	actionRecord.Quantity = quantity
+	actionRecord.Price = plan.EntryPrice
+	actionRecord.EntryType = plan.EntryType
+	actionRecord.EntryPrice = plan.EntryPrice
+	actionRecord.EntryAlgoID = resp.AlgoID
+	actionRecord.EntryClientID = resp.ClientAlgoID
+	actionRecord.EntryStatus = resp.AlgoStatus
+	actionRecord.OrderID = resp.AlgoID
+	actionRecord.Success = true
+	actionRecord.Timestamp = time.Now()
+
+	triggerLog := plan.EntryPrice
+	if orderType == futures.OrderTypeTrailingStopMarket && plan.EntryActivation > 0 {
+		triggerLog = plan.EntryActivation
+	}
+	log.Printf("  ⏳ 条件单已提交 (%s) - algoId=%d, trigger=%.4f, qty=%s", orderTypeLabel, resp.AlgoID, triggerLog, quantityStr)
+	return nil
+}
+
 // executeOpenLongWithRecord 执行开多仓并记录详细信息
 func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
 	log.Printf("  📈 开多仓: %s", decision.Symbol)
@@ -3170,6 +3607,18 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 	quantity := decision.PositionSizeUSD / livePrice
 	actionRecord.Quantity = quantity
 	actionRecord.Price = livePrice
+
+	if orderType, ok := at.shouldUseConditionalEntry(decision); ok {
+		if err := at.placeConditionalOpen(decision, actionRecord, quantity, orderType, futures.SideTypeBuy, futures.PositionSideTypeLong, minHoldDuration, guardStrategy); err != nil {
+			if errors.Is(err, ErrConditionalOrdersUnsupported) {
+				log.Printf("⚠️ 条件单接口不可用，回退为市价下单: %v", err)
+			} else {
+				return err
+			}
+		} else {
+			return nil
+		}
+	}
 
 	// 开仓
 	order, err := at.trader.OpenLong(decision.Symbol, quantity, decision.Leverage)
@@ -3279,6 +3728,18 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
 	quantity := decision.PositionSizeUSD / livePrice
 	actionRecord.Quantity = quantity
 	actionRecord.Price = livePrice
+
+	if orderType, ok := at.shouldUseConditionalEntry(decision); ok {
+		if err := at.placeConditionalOpen(decision, actionRecord, quantity, orderType, futures.SideTypeSell, futures.PositionSideTypeShort, minHoldDuration, guardStrategy); err != nil {
+			if errors.Is(err, ErrConditionalOrdersUnsupported) {
+				log.Printf("⚠️ 条件单接口不可用，回退为市价下单: %v", err)
+			} else {
+				return err
+			}
+		} else {
+			return nil
+		}
+	}
 
 	// 开仓
 	order, err := at.trader.OpenShort(decision.Symbol, quantity, decision.Leverage)
@@ -3455,19 +3916,24 @@ func (at *AutoTrader) GetStatus() map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"trader_id":       at.id,
-		"trader_name":     at.name,
-		"ai_model":        at.aiModel,
-		"exchange":        at.exchange,
-		"is_running":      at.isRunning,
-		"start_time":      at.startTime.Format(time.RFC3339),
-		"runtime_minutes": int(time.Since(at.startTime).Minutes()),
-		"call_count":      at.callCount,
-		"initial_balance": at.initialBalance,
-		"scan_interval":   at.config.ScanInterval.String(),
-		"stop_until":      at.stopUntil.Format(time.RFC3339),
-		"last_reset_time": at.lastResetTime.Format(time.RFC3339),
-		"ai_provider":     aiProvider,
+		"trader_id":             at.id,
+		"trader_name":           at.name,
+		"ai_model":              at.aiModel,
+		"exchange":              at.exchange,
+		"is_running":            at.isRunning,
+		"start_time":            at.startTime.Format(time.RFC3339),
+		"runtime_minutes":       int(time.Since(at.startTime).Minutes()),
+		"call_count":            at.callCount,
+		"initial_balance":       at.initialBalance,
+		"scan_interval":         at.config.ScanInterval.String(),
+		"stop_until":            at.stopUntil.Format(time.RFC3339),
+		"last_reset_time":       at.lastResetTime.Format(time.RFC3339),
+		"ai_provider":           aiProvider,
+		"entry_mode":            at.entryMode,
+		"entry_working_type":    at.entryWorkingType,
+		"entry_price_protect":   at.entryPriceProtect,
+		"entry_timeout_minutes": int(at.entryTimeout.Minutes()),
+		"pending_entries":       at.snapshotPendingEntries(),
 	}
 }
 

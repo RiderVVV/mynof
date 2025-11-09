@@ -68,6 +68,11 @@ func (tm *TraderManager) AddTrader(cfg config.TraderConfig, coinPoolURL string, 
 		TradingWindow:         cfg.TradingWindow,
 		MajorEvents:           cfg.MajorEvents,
 		GuardrailStrict:       cfg.GuardrailStrict,
+		EntryMode:             cfg.GetEntryMode(),
+		EntryWorkingType:      cfg.GetEntryWorkingType(),
+		EntryTimeout:          cfg.GetEntryTimeout(),
+		EntryBufferPct:        cfg.GetEntryBufferPct(),
+		EntryPriceProtect:     cfg.EntryPriceProtect,
 	}
 
 	if cfg.SimpleTrailingGuardEnabled != nil {

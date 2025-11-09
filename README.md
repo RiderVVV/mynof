@@ -630,6 +630,11 @@ For running multiple AI traders competing against each other:
 | `use_default_coins` | Use built-in coin list<br>**✨ Smart Default: `true`** (v2.0.2+)<br>Auto-enabled if no API URL provided | `true` or omit | ❌ No<br>(Optional, auto-defaults) |
 | `coin_pool_api_url` | Custom coin pool API<br>*Only needed when `use_default_coins: false`* | `""` (empty) | ❌ No |
 | `oi_top_api_url` | Open interest API<br>*Optional supplement data* | `""` (empty) | ❌ No |
+| `entry_mode` | Order mode: `"market"` (default) or Binance `"conditional"` algo orders | `"conditional"` | ❌ No (Binance only) |
+| `entry_working_type` | Trigger price source for conditional orders | `"CONTRACT_PRICE"` / `"MARK_PRICE"` | ❌ No |
+| `entry_timeout_minutes` | Auto-cancel timeout for pending conditional entries | `45` | ❌ No |
+| `entry_buffer_pct` | Optional guard buffer (%) for AI trigger math | `0.03` | ❌ No |
+| `entry_price_protect` | Enable Binance priceProtect guard when sending algo orders | `true` / `false` | ❌ No |
 | `api_server_port` | Web dashboard port | `8080` | ✅ Yes |
 
 **Default Trading Coins** (when `use_default_coins: true`):

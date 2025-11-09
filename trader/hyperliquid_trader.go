@@ -592,6 +592,22 @@ func (t *HyperliquidTrader) FormatQuantity(symbol string, quantity float64) (str
 	return fmt.Sprintf(formatStr, quantity), nil
 }
 
+func (t *HyperliquidTrader) PlaceConditionalOrder(req *ConditionalOrderRequest) (*ConditionalOrderResponse, error) {
+	return nil, ErrConditionalOrdersUnsupported
+}
+
+func (t *HyperliquidTrader) QueryConditionalOrder(algoID int64, clientAlgoID string) (*ConditionalOrderResponse, error) {
+	return nil, ErrConditionalOrdersUnsupported
+}
+
+func (t *HyperliquidTrader) CancelConditionalOrder(algoID int64, clientAlgoID string) error {
+	return ErrConditionalOrdersUnsupported
+}
+
+func (t *HyperliquidTrader) CancelAllConditionalOrders(symbol string) error {
+	return ErrConditionalOrdersUnsupported
+}
+
 // getSzDecimals 获取币种的数量精度
 func (t *HyperliquidTrader) getSzDecimals(coin string) int {
 	if t.meta == nil {

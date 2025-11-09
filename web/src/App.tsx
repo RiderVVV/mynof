@@ -368,6 +368,27 @@ function TraderDetailsPage({
     );
   }
 
+  const pendingEntries = status?.pending_entries ?? [];
+  const entryModeLabel = status?.entry_mode === 'conditional' ? '条件单 (Binance Algo)' : '市价单';
+  const formatTrigger = (value?: number) => {
+    if (value === undefined || value === null || Number.isNaN(value)) return '--';
+    if (value >= 100) return value.toFixed(2);
+    if (value >= 1) return value.toFixed(3);
+    return value.toFixed(4);
+  };
+  const formatCountdown = (iso?: string) => {
+    if (!iso) return '—';
+    const diff = new Date(iso).getTime() - Date.now();
+    if (diff <= 0) return '即将处理';
+    const minutes = Math.floor(diff / 60000);
+    if (minutes <= 0) return '<1 min';
+    if (minutes > 120) {
+      const hours = Math.floor(minutes / 60);
+      return `${hours} h`;
+    }
+    return `${minutes} min`;
+  };
+
   return (
     <div>
       {/* Trader Header */}
@@ -390,6 +411,54 @@ function TraderDetailsPage({
           )}
         </div>
       </div>
+
+      {status && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
+          <div className="binance-card p-5">
+            <p className="text-sm font-semibold" style={{ color: '#848E9C' }}>下单模式</p>
+            <div className="text-2xl font-bold mt-1" style={{ color: '#EAECEF' }}>{entryModeLabel}</div>
+            {status.entry_mode === 'conditional' ? (
+              <div className="text-sm mt-2" style={{ color: '#8A948F' }}>
+                触发价格源：{status.entry_working_type ?? 'CONTRACT_PRICE'} · 超时 {status.entry_timeout_minutes ?? 30} 分钟
+                <br />价格保护：{status.entry_price_protect ? '开启' : '关闭'}
+              </div>
+            ) : (
+              <div className="text-sm mt-2" style={{ color: '#8A948F' }}>AI 将直接使用市价单立即建仓。</div>
+            )}
+          </div>
+          <div className="binance-card p-5">
+            <div className="flex items-center justify-between mb-3">
+              <p className="text-sm font-semibold" style={{ color: '#848E9C' }}>挂单队列</p>
+              {pendingEntries.length > 0 && (
+                <span className="text-xs" style={{ color: '#8A948F' }}>{pendingEntries.length} 条</span>
+              )}
+            </div>
+            {pendingEntries.length === 0 ? (
+              <p className="text-sm" style={{ color: '#8A948F' }}>当前没有等待触发的条件单。</p>
+            ) : (
+              <div className="space-y-3">
+                {pendingEntries.slice(0, 3).map((entry) => (
+                  <div key={`${entry.algo_id}-${entry.client_algo_id}`} className="flex items-center justify-between gap-4">
+                    <div>
+                      <div className="font-semibold" style={{ color: '#EAECEF' }}>{entry.symbol}</div>
+                      <div className="text-xs uppercase" style={{ color: '#8A948F' }}>
+                        {entry.side === 'long' ? '做多' : '做空'} · {entry.order_type?.replace(/_/g, ' ')}
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <div className="font-mono text-sm" style={{ color: '#F0B90B' }}>{formatTrigger(entry.trigger_price)}</div>
+                      <div className="text-xs" style={{ color: '#8A948F' }}>剩余 {formatCountdown(entry.expires_at)}</div>
+                    </div>
+                  </div>
+                ))}
+                {pendingEntries.length > 3 && (
+                  <p className="text-xs" style={{ color: '#8A948F' }}>其余 {pendingEntries.length - 3} 条可在 API 查看。</p>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Debug Info */}
       {account && (

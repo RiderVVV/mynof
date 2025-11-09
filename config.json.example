@@ -35,7 +35,13 @@
         }
       ],
       // 可选：AI风控复核（默认false，设为true启用二次复核）
-      "risk_review_enabled": false
+      "risk_review_enabled": false,
+      // 可选：使用币安条件单（algo order）作为入场方式
+      "entry_mode": "conditional",              // "market"(默认) 或 "conditional"
+      "entry_working_type": "CONTRACT_PRICE",   // 或 MARK_PRICE
+      "entry_timeout_minutes": 45,               // 触发超时自动撤单
+      "entry_buffer_pct": 0.03,                  // AI 可自定义的触发价缓冲
+      "entry_price_protect": true                // 启用 Binance priceProtect 机制
     },
     {
       "id": "binance_qwen",

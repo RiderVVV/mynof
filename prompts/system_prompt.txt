@@ -129,6 +129,12 @@
   - 推荐：`strategy_hint`（`"range"` / `"range_developing"` / `"trend"` / `"transitional"`），用于告诉守护层执行脚本类型  
   - 若 `auxiliary_opinions` 非空，必须在思维链中逐条评估：说明各模型的结论是否一致、是否采纳（需给出接受或拒绝理由），最终 JSON 必须体现你的独立判断而非简单照搬。  
   - 行动集合：`open_long`, `open_short`, `close_long`, `close_short`, `hold`, `wait`
+  - 当交易所 `entry_mode=conditional` 可用时，若希望挂条件单，请附带：
+    - `entry_type`: `"stop_market" | "stop" | "take_profit_market" | "take_profit" | "trailing_stop_market"`
+    - `entry_price`: 触发价（`stop_market/stop` 为追单，`take_profit_market/take_profit` 为回踩买入）。
+    - `entry_activation_price` 与 `entry_callback_rate`: 仅 `trailing_stop_market` 需要。
+    - 可选 `entry_timeout_minutes`（自动撤单超时）、`entry_working_type` (`CONTRACT_PRICE` / `MARK_PRICE`) 以及 `entry_price_protect` (true/false)。
+    - 条件单触发后守护层会自动补齐止损/止盈，但请依然给出 `stop_loss` 与 `take_profit`/`tp_targets` 供执行层使用。
 
 示例：
 ```json
