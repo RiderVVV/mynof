@@ -17,7 +17,14 @@ import (
 )
 
 const (
-	minOrderNotionalUSD = 5.1 // 略高于交易所 5 USDT 的硬性下限，避免因边界舍入被拒单
+	minOrderNotionalUSD      = 5.1   // 略高于交易所 5 USDT 的硬性下限，避免因边界舍入被拒单
+	riskBudgetFraction       = 0.03  // 默认风险预算（3%净值）
+	coolingRiskFraction      = 0.015 // 冷却阶段风险预算减半
+	minStopDistancePct       = 0.15  // 止损至少距离现价0.15%
+	maxSnapshotDriftPct      = 0.35  // 决策生成到执行的最大允许价格偏移(%)
+	defaultMinRewardToRisk   = 2.0   // 默认最小盈亏比
+	coolingMinRewardToRisk   = 2.8   // 冷却阶段最小盈亏比
+	coolingConfidenceMinimum = 80    // 冷却阶段最小信心
 )
 
 // AutoTraderConfig 自动交易配置（简化版 - AI全权决策）
@@ -138,6 +145,12 @@ type positionManagementState struct {
 	StopLoss        float64
 	InitialQuantity float64
 	Targets         []*positionTargetState
+}
+
+type riskCheckResult struct {
+	riskUSD      float64
+	rewardToRisk float64
+	riskLimitUSD float64
 }
 
 // AutoTrader 自动交易器
@@ -1110,6 +1123,7 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 
 	recentRiskAlerts := make([]decision.RiskFlag, 0)
 	recentGuardrails := make([]decision.MarketGuardrailWarning, 0)
+	recentRiskUsage := 0.0
 	if records, err := at.decisionLogger.GetLatestRecords(5); err == nil {
 		for _, rec := range records {
 			for _, evt := range rec.RiskFlags {
@@ -1130,6 +1144,17 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 					})
 				} else {
 					recentRiskAlerts = append(recentRiskAlerts, riskFlag)
+				}
+			}
+			for _, act := range rec.Decisions {
+				if act.RiskUSD <= 0 {
+					continue
+				}
+				switch act.Action {
+				case "open_long", "open_short":
+					if act.RiskUSD > recentRiskUsage {
+						recentRiskUsage = act.RiskUSD
+					}
 				}
 			}
 		}
@@ -1167,14 +1192,14 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		RecentGuardrails: recentGuardrails,
 	}
 
-	perfState, cooling := derivePerformanceCoolingState(performance, ctx.Account.TotalEquity*0.03)
+	perfState, cooling := derivePerformanceCoolingState(performance, ctx.Account.TotalEquity*riskBudgetFraction, recentRiskUsage)
 	ctx.PerformanceState = perfState
 	ctx.SharpeCooling = cooling
 
 	return ctx, nil
 }
 
-func derivePerformanceCoolingState(perf *logger.PerformanceAnalysis, riskBudget float64) (string, string) {
+func derivePerformanceCoolingState(perf *logger.PerformanceAnalysis, riskBudget float64, recentRiskUsage float64) (string, string) {
 	if perf == nil {
 		return "", ""
 	}
@@ -1208,7 +1233,153 @@ func derivePerformanceCoolingState(perf *logger.PerformanceAnalysis, riskBudget 
 		perfState = "positive"
 	}
 
+	if riskBudget > 0 {
+		switch {
+		case recentRiskUsage >= riskBudget*1.2:
+			cooling = "halt_3_cycles"
+			if perfState == "" {
+				perfState = "drawdown"
+			}
+		case recentRiskUsage >= riskBudget*0.95 && cooling == "":
+			cooling = "only_high_confidence_trades"
+		}
+	}
+
 	return perfState, cooling
+}
+
+func (at *AutoTrader) enforceOpenRisk(decision *decision.Decision, livePrice float64, side string) (*riskCheckResult, error) {
+	if decision == nil {
+		return nil, fmt.Errorf("决策为空")
+	}
+	if livePrice <= 0 {
+		return nil, fmt.Errorf("无法获取有效价格")
+	}
+	if decision.PositionSizeUSD <= 0 {
+		return nil, fmt.Errorf("position_size_usd 无效")
+	}
+	if decision.StopLoss <= 0 {
+		return nil, fmt.Errorf("缺少有效止损")
+	}
+	ctx := at.activeContext
+	totalEquity := at.initialBalance
+	var snapshotPrice float64
+	cooling := ""
+	if ctx != nil {
+		if ctx.Account.TotalEquity > 0 {
+			totalEquity = ctx.Account.TotalEquity
+		}
+		cooling = ctx.SharpeCooling
+		if ctx.MarketDataMap != nil {
+			if data, ok := ctx.MarketDataMap[strings.ToUpper(decision.Symbol)]; ok && data != nil {
+				snapshotPrice = data.CurrentPrice
+			}
+		}
+	}
+
+	riskLimit := totalEquity * riskBudgetFraction
+	if riskLimit <= 0 {
+		riskLimit = at.initialBalance * riskBudgetFraction
+	}
+	minRR := defaultMinRewardToRisk
+
+	coolingKey := strings.ToLower(strings.TrimSpace(cooling))
+	if strings.HasPrefix(coolingKey, "halt") {
+		return nil, fmt.Errorf("冷却状态 %s 禁止新开仓", cooling)
+	}
+	if coolingKey == "only_high_confidence_trades" {
+		tmpBudget := totalEquity * coolingRiskFraction
+		if tmpBudget <= 0 {
+			tmpBudget = at.initialBalance * coolingRiskFraction
+		}
+		if tmpBudget > 0 {
+			riskLimit = tmpBudget
+		}
+		minRR = coolingMinRewardToRisk
+		if decision.Confidence < coolingConfidenceMinimum {
+			return nil, fmt.Errorf("冷却阶段需要信心≥%d (当前 %d)", coolingConfidenceMinimum, decision.Confidence)
+		}
+	}
+	if riskLimit <= 0 {
+		return nil, fmt.Errorf("无法计算风险预算")
+	}
+
+	var stopDistance float64
+	switch strings.ToLower(side) {
+	case "long":
+		if decision.StopLoss >= livePrice {
+			return nil, fmt.Errorf("多单止损必须低于现价")
+		}
+		stopDistance = livePrice - decision.StopLoss
+	case "short":
+		if decision.StopLoss <= livePrice {
+			return nil, fmt.Errorf("空单止损必须高于现价")
+		}
+		stopDistance = decision.StopLoss - livePrice
+	default:
+		return nil, fmt.Errorf("未知方向: %s", side)
+	}
+
+	stopDistancePct := (stopDistance / livePrice) * 100
+	if stopDistancePct < minStopDistancePct {
+		return nil, fmt.Errorf("止损距离 %.4f%% 低于最小阈值 %.2f%%", stopDistancePct, minStopDistancePct)
+	}
+
+	riskUSD := decision.PositionSizeUSD * (stopDistance / livePrice)
+	if riskUSD <= 0 {
+		return nil, fmt.Errorf("计算risk_usd失败")
+	}
+
+	if riskUSD > riskLimit {
+		scale := riskLimit / riskUSD
+		adjustedSize := decision.PositionSizeUSD * scale
+		if adjustedSize < minOrderNotionalUSD {
+			return nil, fmt.Errorf("缩减后仓位 %.2f 低于最小名义金额 %.2f", adjustedSize, minOrderNotionalUSD)
+		}
+		log.Printf("  ⚖️ 风控: %s 风险%.2fUSD超限，自动缩仓 %.2f -> %.2f USDT", decision.Symbol, riskUSD, decision.PositionSizeUSD, adjustedSize)
+		decision.PositionSizeUSD = adjustedSize
+		if decision.RiskUSD > 0 {
+			decision.RiskUSD = decision.RiskUSD * scale
+		}
+		riskUSD = decision.PositionSizeUSD * (stopDistance / livePrice)
+	}
+
+	if decision.TakeProfit <= 0 {
+		return nil, fmt.Errorf("缺少有效止盈")
+	}
+
+	var rewardDistance float64
+	switch strings.ToLower(side) {
+	case "long":
+		if decision.TakeProfit <= livePrice {
+			return nil, fmt.Errorf("多单止盈必须高于现价")
+		}
+		rewardDistance = decision.TakeProfit - livePrice
+	case "short":
+		if decision.TakeProfit >= livePrice {
+			return nil, fmt.Errorf("空单止盈必须低于现价")
+		}
+		rewardDistance = livePrice - decision.TakeProfit
+	}
+
+	rewardToRisk := rewardDistance / stopDistance
+	if rewardToRisk < minRR {
+		return nil, fmt.Errorf("盈亏比 %.2f 低于最低要求 %.2f", rewardToRisk, minRR)
+	}
+
+	if snapshotPrice > 0 {
+		driftPct := math.Abs(livePrice-snapshotPrice) / snapshotPrice * 100
+		if driftPct > maxSnapshotDriftPct {
+			return nil, fmt.Errorf("价格偏移 %.2f%% 超过阈值 %.2f%% (%.4f→%.4f)", driftPct, maxSnapshotDriftPct, snapshotPrice, livePrice)
+		}
+	}
+
+	decision.RiskUSD = riskUSD
+	return &riskCheckResult{
+		riskUSD:      riskUSD,
+		rewardToRisk: rewardToRisk,
+		riskLimitUSD: riskLimit,
+	}, nil
 }
 
 func clampFloat(min, max, value float64) float64 {
@@ -1293,6 +1464,59 @@ func defaultStrategyFromRegime(regime string) string {
 	default:
 		return "transitional"
 	}
+}
+
+func (at *AutoTrader) fillActionRecordFromOrder(actionRecord *logger.DecisionAction, order map[string]interface{}) {
+	if actionRecord == nil || order == nil {
+		return
+	}
+
+	if orderID, ok := order["orderId"].(int64); ok {
+		actionRecord.OrderID = orderID
+	} else if idFloat, ok := getOrderFloat(order, "orderId"); ok {
+		actionRecord.OrderID = int64(idFloat)
+	}
+
+	if price, ok := getOrderFloat(order, "avgPrice"); ok && price > 0 {
+		actionRecord.Price = price
+	}
+	if qty, ok := getOrderFloat(order, "executedQty"); ok && qty > 0 {
+		actionRecord.Quantity = qty
+	} else if cumQuote, ok := getOrderFloat(order, "cumQuote"); ok {
+		if price, ok := getOrderFloat(order, "avgPrice"); ok && price > 0 {
+			actionRecord.Quantity = cumQuote / price
+		}
+	}
+}
+
+func getOrderFloat(order map[string]interface{}, key string) (float64, bool) {
+	if order == nil {
+		return 0, false
+	}
+	val, ok := order[key]
+	if !ok {
+		return 0, false
+	}
+
+	switch v := val.(type) {
+	case float64:
+		return v, true
+	case int:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	case string:
+		f, err := strconv.ParseFloat(v, 64)
+		if err == nil {
+			return f, true
+		}
+	case json.Number:
+		f, err := v.Float64()
+		if err == nil {
+			return f, true
+		}
+	}
+	return 0, false
 }
 
 func (at *AutoTrader) applyOpenGuard(decision *decision.Decision, marketData *market.Data, side string) (time.Duration, string, error) {
@@ -2723,7 +2947,7 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 		}
 	}
 
-	// 获取当前价格
+	// 获取最新市场快照
 	marketData, err := market.Get(decision.Symbol)
 	if err != nil {
 		return err
@@ -2740,6 +2964,24 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 			return guardErr
 		}
 	}
+	livePrice := marketData.CurrentPrice
+	if ask, err := at.trader.GetMarketPrice(decision.Symbol); err == nil && ask > 0 {
+		livePrice = ask
+	} else if err != nil {
+		log.Printf("  ⚠️ 获取实时价格失败，使用快照价: %v", err)
+	}
+	if livePrice <= 0 {
+		return fmt.Errorf("无法获取有效价格")
+	}
+
+	riskEval, err := at.enforceOpenRisk(decision, livePrice, "long")
+	if err != nil {
+		return err
+	}
+	actionRecord.RiskUSD = riskEval.riskUSD
+	actionRecord.RiskLimitUSD = riskEval.riskLimitUSD
+	actionRecord.RewardToRisk = riskEval.rewardToRisk
+
 	if decision.PositionSizeUSD <= 0 {
 		return fmt.Errorf("守护调整后仓位为0，取消开仓")
 	}
@@ -2747,10 +2989,9 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 		return fmt.Errorf("计划名义金额 %.2f USDT 低于交易所最小下单 %.2f USDT，取消开仓", decision.PositionSizeUSD, minOrderNotionalUSD)
 	}
 
-	// 计算数量（根据可能调整后的仓位大小）
-	quantity := decision.PositionSizeUSD / marketData.CurrentPrice
+	quantity := decision.PositionSizeUSD / livePrice
 	actionRecord.Quantity = quantity
-	actionRecord.Price = marketData.CurrentPrice
+	actionRecord.Price = livePrice
 
 	// 开仓
 	order, err := at.trader.OpenLong(decision.Symbol, quantity, decision.Leverage)
@@ -2758,10 +2999,7 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 		return err
 	}
 
-	// 记录订单ID
-	if orderID, ok := order["orderId"].(int64); ok {
-		actionRecord.OrderID = orderID
-	}
+	at.fillActionRecordFromOrder(actionRecord, order)
 
 	log.Printf("  ✓ 开仓成功，订单ID: %v, 数量: %.4f", order["orderId"], quantity)
 
@@ -2814,7 +3052,7 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
 		}
 	}
 
-	// 获取当前价格
+	// 获取最新市场快照
 	marketData, err := market.Get(decision.Symbol)
 	if err != nil {
 		return err
@@ -2831,6 +3069,24 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
 			return guardErr
 		}
 	}
+	livePrice := marketData.CurrentPrice
+	if price, err := at.trader.GetMarketPrice(decision.Symbol); err == nil && price > 0 {
+		livePrice = price
+	} else if err != nil {
+		log.Printf("  ⚠️ 获取实时价格失败，使用快照价: %v", err)
+	}
+	if livePrice <= 0 {
+		return fmt.Errorf("无法获取有效价格")
+	}
+
+	riskEval, err := at.enforceOpenRisk(decision, livePrice, "short")
+	if err != nil {
+		return err
+	}
+	actionRecord.RiskUSD = riskEval.riskUSD
+	actionRecord.RiskLimitUSD = riskEval.riskLimitUSD
+	actionRecord.RewardToRisk = riskEval.rewardToRisk
+
 	if decision.PositionSizeUSD <= 0 {
 		return fmt.Errorf("守护调整后仓位为0，取消开仓")
 	}
@@ -2839,9 +3095,9 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
 	}
 
 	// 计算数量
-	quantity := decision.PositionSizeUSD / marketData.CurrentPrice
+	quantity := decision.PositionSizeUSD / livePrice
 	actionRecord.Quantity = quantity
-	actionRecord.Price = marketData.CurrentPrice
+	actionRecord.Price = livePrice
 
 	// 开仓
 	order, err := at.trader.OpenShort(decision.Symbol, quantity, decision.Leverage)
@@ -2849,10 +3105,7 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
 		return err
 	}
 
-	// 记录订单ID
-	if orderID, ok := order["orderId"].(int64); ok {
-		actionRecord.OrderID = orderID
-	}
+	at.fillActionRecordFromOrder(actionRecord, order)
 
 	log.Printf("  ✓ 开仓成功，订单ID: %v, 数量: %.4f", order["orderId"], quantity)
 
@@ -2906,12 +3159,14 @@ func (at *AutoTrader) executeCloseLongWithRecord(decision *decision.Decision, ac
 		}
 	}
 
-	// 获取当前价格
-	marketData, err := market.Get(decision.Symbol)
-	if err != nil {
-		return err
+	livePrice, priceErr := at.trader.GetMarketPrice(decision.Symbol)
+	if priceErr != nil {
+		log.Printf("  ⚠️ 获取实时价格失败，尝试使用快照: %v", priceErr)
+		if marketData, err := market.Get(decision.Symbol); err == nil {
+			livePrice = marketData.CurrentPrice
+		}
 	}
-	actionRecord.Price = marketData.CurrentPrice
+	actionRecord.Price = livePrice
 
 	// 平仓
 	order, err := at.trader.CloseLong(decision.Symbol, 0) // 0 = 全部平仓
@@ -2919,10 +3174,7 @@ func (at *AutoTrader) executeCloseLongWithRecord(decision *decision.Decision, ac
 		return err
 	}
 
-	// 记录订单ID
-	if orderID, ok := order["orderId"].(int64); ok {
-		actionRecord.OrderID = orderID
-	}
+	at.fillActionRecordFromOrder(actionRecord, order)
 
 	log.Printf("  ✓ 平仓成功")
 	at.clearPositionState(posKey)
@@ -2944,12 +3196,14 @@ func (at *AutoTrader) executeCloseShortWithRecord(decision *decision.Decision, a
 		}
 	}
 
-	// 获取当前价格
-	marketData, err := market.Get(decision.Symbol)
-	if err != nil {
-		return err
+	livePrice, priceErr := at.trader.GetMarketPrice(decision.Symbol)
+	if priceErr != nil {
+		log.Printf("  ⚠️ 获取实时价格失败，尝试使用快照: %v", priceErr)
+		if marketData, err := market.Get(decision.Symbol); err == nil {
+			livePrice = marketData.CurrentPrice
+		}
 	}
-	actionRecord.Price = marketData.CurrentPrice
+	actionRecord.Price = livePrice
 
 	// 平仓
 	order, err := at.trader.CloseShort(decision.Symbol, 0) // 0 = 全部平仓
@@ -2957,10 +3211,7 @@ func (at *AutoTrader) executeCloseShortWithRecord(decision *decision.Decision, a
 		return err
 	}
 
-	// 记录订单ID
-	if orderID, ok := order["orderId"].(int64); ok {
-		actionRecord.OrderID = orderID
-	}
+	at.fillActionRecordFromOrder(actionRecord, order)
 
 	log.Printf("  ✓ 平仓成功")
 	at.clearPositionState(posKey)

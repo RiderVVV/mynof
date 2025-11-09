@@ -245,6 +245,12 @@ func (t *FuturesTrader) OpenLong(symbol string, quantity float64, leverage int) 
 	result["orderId"] = order.OrderID
 	result["symbol"] = order.Symbol
 	result["status"] = order.Status
+	if avgPrice, err := strconv.ParseFloat(order.AvgPrice, 64); err == nil {
+		result["avgPrice"] = avgPrice
+	}
+	if executedQty, err := strconv.ParseFloat(order.ExecutedQuantity, 64); err == nil {
+		result["executedQty"] = executedQty
+	}
 	return result, nil
 }
 
@@ -291,6 +297,12 @@ func (t *FuturesTrader) OpenShort(symbol string, quantity float64, leverage int)
 	result["orderId"] = order.OrderID
 	result["symbol"] = order.Symbol
 	result["status"] = order.Status
+	if avgPrice, err := strconv.ParseFloat(order.AvgPrice, 64); err == nil {
+		result["avgPrice"] = avgPrice
+	}
+	if executedQty, err := strconv.ParseFloat(order.ExecutedQuantity, 64); err == nil {
+		result["executedQty"] = executedQty
+	}
 	return result, nil
 }
 
@@ -345,6 +357,12 @@ func (t *FuturesTrader) CloseLong(symbol string, quantity float64) (map[string]i
 	result["orderId"] = order.OrderID
 	result["symbol"] = order.Symbol
 	result["status"] = order.Status
+	if avgPrice, err := strconv.ParseFloat(order.AvgPrice, 64); err == nil {
+		result["avgPrice"] = avgPrice
+	}
+	if executedQty, err := strconv.ParseFloat(order.ExecutedQuantity, 64); err == nil {
+		result["executedQty"] = executedQty
+	}
 	return result, nil
 }
 
@@ -399,6 +417,12 @@ func (t *FuturesTrader) CloseShort(symbol string, quantity float64) (map[string]
 	result["orderId"] = order.OrderID
 	result["symbol"] = order.Symbol
 	result["status"] = order.Status
+	if avgPrice, err := strconv.ParseFloat(order.AvgPrice, 64); err == nil {
+		result["avgPrice"] = avgPrice
+	}
+	if executedQty, err := strconv.ParseFloat(order.ExecutedQuantity, 64); err == nil {
+		result["executedQty"] = executedQty
+	}
 	return result, nil
 }
 

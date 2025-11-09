@@ -13,7 +13,10 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 )
 
 // MaxMarginUsagePct 定义总保证金使用率的硬上限（百分比）
@@ -357,43 +360,74 @@ func fetchMarketDataForContext(ctx *Context) error {
 	}
 
 	// 并发获取市场数据
-	// 持仓币种集合（用于判断是否跳过OI检查）
 	positionSymbols := make(map[string]bool)
 	for _, pos := range ctx.Positions {
 		positionSymbols[pos.Symbol] = true
 	}
 
+	type symbolResult struct {
+		symbol     string
+		data       *market.Data
+		guardrails []MarketGuardrailWarning
+	}
+
+	var (
+		results []symbolResult
+		mu      sync.Mutex
+		g       errgroup.Group
+		sem     = make(chan struct{}, 6)
+	)
+
 	for symbol := range symbolSet {
-		data, err := market.Get(symbol)
-		if err != nil {
-			// 单个币种失败不影响整体，只记录错误
-			continue
-		}
+		sym := symbol
+		g.Go(func() error {
+			sem <- struct{}{}
+			defer func() { <-sem }()
 
-		// ⚠️ 流动性过滤：持仓价值低于15M USD的币种不做（多空都不做）
-		// 持仓价值 = 持仓量 × 当前价格
-		// 但现有持仓必须保留（需要决策是否平仓）
-		isExistingPosition := positionSymbols[symbol]
-		if !isExistingPosition && data.OpenInterest != nil && data.CurrentPrice > 0 {
-			// 计算持仓价值（USD）= 持仓量 × 当前价格
-			oiValue := data.OpenInterest.Latest * data.CurrentPrice
-			oiValueInMillions := oiValue / 1_000_000 // 转换为百万美元单位
-			if oiValueInMillions < 15 {
-				log.Printf("⚠️  %s 持仓价值过低(%.2fM USD < 15M)，跳过此币种 [持仓量:%.0f × 价格:%.4f]",
-					symbol, oiValueInMillions, data.OpenInterest.Latest, data.CurrentPrice)
-				continue
+			data, err := market.Get(sym)
+			if err != nil {
+				log.Printf("⚠️  获取 %s 市场数据失败: %v", sym, err)
+				return nil
 			}
-		}
 
-		guardrails := GuardrailWarningsForMarket(data)
-		if len(guardrails) > 0 {
-			ctx.RecentGuardrails = appendGuardrailHistory(ctx.RecentGuardrails, guardrails...)
-			if !isExistingPosition && hasHighSeverityGuardrail(guardrails) {
-				log.Printf("🧭  %s 命中高风险 guardrail，仍保留候选但需关注: %s", symbol, summarizeGuardrails(guardrails))
+			// ⚠️ 流动性过滤：持仓价值低于15M USD的币种不做（多空都不做）
+			isExistingPosition := positionSymbols[sym]
+			if !isExistingPosition && data.OpenInterest != nil && data.CurrentPrice > 0 {
+				oiValue := data.OpenInterest.Latest * data.CurrentPrice
+				oiValueInMillions := oiValue / 1_000_000
+				if oiValueInMillions < 15 {
+					log.Printf("⚠️  %s 持仓价值过低(%.2fM USD < 15M)，跳过此币种 [持仓量:%.0f × 价格:%.4f]",
+						sym, oiValueInMillions, data.OpenInterest.Latest, data.CurrentPrice)
+					return nil
+				}
 			}
-		}
 
-		ctx.MarketDataMap[symbol] = data
+			guardrails := GuardrailWarningsForMarket(data)
+			if len(guardrails) > 0 && !isExistingPosition && hasHighSeverityGuardrail(guardrails) {
+				log.Printf("🧭  %s 命中高风险 guardrail，仍保留候选但需关注: %s", sym, summarizeGuardrails(guardrails))
+			}
+
+			mu.Lock()
+			results = append(results, symbolResult{
+				symbol:     sym,
+				data:       data,
+				guardrails: guardrails,
+			})
+			mu.Unlock()
+
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		return err
+	}
+
+	for _, res := range results {
+		ctx.MarketDataMap[res.symbol] = res.data
+		if len(res.guardrails) > 0 {
+			ctx.RecentGuardrails = appendGuardrailHistory(ctx.RecentGuardrails, res.guardrails...)
+		}
 	}
 
 	// 加载OI Top数据（不影响主流程）

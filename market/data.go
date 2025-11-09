@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 // Data 市场数据结构
@@ -104,9 +106,50 @@ type Kline struct {
 }
 
 // Get 获取指定代币的市场数据
+var (
+	dataCache = struct {
+		sync.RWMutex
+		entries map[string]*cacheEntry
+	}{
+		entries: make(map[string]*cacheEntry),
+	}
+	cacheTTL = 20 * time.Second
+)
+
+type cacheEntry struct {
+	data      *Data
+	fetchedAt time.Time
+}
+
+func getCachedData(symbol string) *Data {
+	dataCache.RLock()
+	entry, ok := dataCache.entries[symbol]
+	dataCache.RUnlock()
+	if !ok || entry == nil {
+		return nil
+	}
+	if time.Since(entry.fetchedAt) > cacheTTL {
+		return nil
+	}
+	return entry.data
+}
+
+func storeCachedData(symbol string, data *Data) {
+	dataCache.Lock()
+	dataCache.entries[symbol] = &cacheEntry{
+		data:      data,
+		fetchedAt: time.Now(),
+	}
+	dataCache.Unlock()
+}
+
 func Get(symbol string) (*Data, error) {
 	// 标准化symbol
 	symbol = Normalize(symbol)
+
+	if cached := getCachedData(symbol); cached != nil {
+		return cached, nil
+	}
 
 	// 获取3分钟K线数据 (最近80个)
 	klines3m, err := getKlines(symbol, "3m", 80) // 多获取一些用于计算
@@ -188,7 +231,7 @@ func Get(symbol string) (*Data, error) {
 	atr15m := calculateATR(klines15m, 14)
 	rangeState := calculateRangeState(klines15m, klines1h, klines4h, atr15m, currentPrice)
 
-	return &Data{
+	result := &Data{
 		Symbol:            symbol,
 		CurrentPrice:      currentPrice,
 		PriceChange15m:    priceChange15m,
@@ -204,7 +247,10 @@ func Get(symbol string) (*Data, error) {
 		HourlyContext:     hourlyData,
 		LongerTermContext: longerTermData,
 		RangeState:        rangeState,
-	}, nil
+	}
+
+	storeCachedData(symbol, result)
+	return result, nil
 }
 
 // getKlines 从Binance获取K线数据
