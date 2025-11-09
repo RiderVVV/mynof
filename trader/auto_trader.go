@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/adshao/go-binance/v2/futures"
@@ -247,6 +248,7 @@ type AutoTrader struct {
 	profitGuardAnchorPct    float64
 	profitGuardRetainRatio  float64
 	profitGuardMinRetainUSD float64
+	executionMu             sync.Mutex
 }
 
 type profitProtectionThresholds struct {
@@ -750,6 +752,9 @@ func (at *AutoTrader) Stop() {
 
 // runGuardCycle 只执行守护巡检（不调用AI）
 func (at *AutoTrader) runGuardCycle() error {
+	at.executionMu.Lock()
+	defer at.executionMu.Unlock()
+
 	ctx, err := at.buildTradingContext()
 	if err != nil {
 		return fmt.Errorf("守护巡检构建交易上下文失败: %w", err)
@@ -776,6 +781,9 @@ func (at *AutoTrader) runGuardCycle() error {
 
 // runCycle 运行一个交易周期（使用AI全权决策）
 func (at *AutoTrader) runCycle() error {
+	at.executionMu.Lock()
+	defer at.executionMu.Unlock()
+
 	at.callCount++
 
 	log.Print("\n" + strings.Repeat("=", 70))
@@ -4395,6 +4403,76 @@ func (at *AutoTrader) GetPositions() ([]map[string]interface{}, error) {
 	}
 
 	return result, nil
+}
+
+// TriggerManualCycle 立即触发一次AI决策周期
+func (at *AutoTrader) TriggerManualCycle(reason string) error {
+	if !at.isRunning {
+		return fmt.Errorf("[%s] 未在运行，无法手动刷新AI", at.name)
+	}
+	if strings.TrimSpace(reason) == "" {
+		reason = "manual"
+	}
+	log.Printf("🖐 手动触发AI决策 (%s)", reason)
+	return at.runCycle()
+}
+
+// ManualClosePosition 手动平仓（支持部分或全部）
+func (at *AutoTrader) ManualClosePosition(symbol, side string, quantity float64) (map[string]interface{}, error) {
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	side = strings.ToLower(strings.TrimSpace(side))
+
+	if symbol == "" {
+		return nil, fmt.Errorf("symbol不能为空")
+	}
+	if side != "long" && side != "short" {
+		return nil, fmt.Errorf("side必须是long或short")
+	}
+	if quantity < 0 {
+		quantity = -quantity
+	}
+
+	var (
+		order map[string]interface{}
+		err   error
+	)
+
+	switch side {
+	case "long":
+		log.Printf("🖐 手动平多: %s (数量=%.4f，0代表全平)", symbol, quantity)
+		order, err = at.trader.CloseLong(symbol, quantity)
+	case "short":
+		log.Printf("🖐 手动平空: %s (数量=%.4f，0代表全平)", symbol, quantity)
+		order, err = at.trader.CloseShort(symbol, quantity)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("平仓失败: %w", err)
+	}
+
+	posKey := positionKey(symbol, side)
+	remaining := false
+	if positions, err := at.trader.GetPositions(); err == nil {
+		for _, pos := range positions {
+			ps, _ := pos["symbol"].(string)
+			pside, _ := pos["side"].(string)
+			if strings.ToUpper(ps) != symbol || strings.ToLower(pside) != side {
+				continue
+			}
+			qty, _ := pos["positionAmt"].(float64)
+			if qty < 0 {
+				qty = -qty
+			}
+			if qty > 0 {
+				remaining = true
+				break
+			}
+		}
+	}
+	if !remaining {
+		at.clearPositionState(posKey)
+	}
+
+	return order, nil
 }
 
 // sortDecisionsByPriority 对决策排序：先平仓，再开仓，最后hold/wait
