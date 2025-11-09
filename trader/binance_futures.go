@@ -677,7 +677,7 @@ func (t *FuturesTrader) PlaceConditionalOrder(req *ConditionalOrderRequest) (*Co
 	if req.CallbackRate != "" {
 		params.Set("callbackRate", req.CallbackRate)
 	}
-	data, err := t.signedRequest(context.Background(), http.MethodPost, "/fapi/v1/algo/order", params, true)
+	data, err := t.signedRequest(context.Background(), http.MethodPost, "/fapi/v1/algoOrder", params, true)
 	if err != nil {
 		return nil, err
 	}
@@ -702,7 +702,7 @@ func (t *FuturesTrader) QueryConditionalOrder(algoID int64, clientAlgoID string)
 	if len(params) == 0 {
 		return nil, fmt.Errorf("algoId or clientAlgoId required")
 	}
-	data, err := t.signedRequest(context.Background(), http.MethodGet, "/fapi/v1/algo/order", params, false)
+	data, err := t.signedRequest(context.Background(), http.MethodGet, "/fapi/v1/algoOrder", params, false)
 	if err != nil {
 		return nil, err
 	}
@@ -724,7 +724,7 @@ func (t *FuturesTrader) CancelConditionalOrder(algoID int64, clientAlgoID string
 	if len(params) == 0 {
 		return fmt.Errorf("algoId or clientAlgoId required")
 	}
-	_, err := t.signedRequest(context.Background(), http.MethodDelete, "/fapi/v1/algo/order", params, false)
+	_, err := t.signedRequest(context.Background(), http.MethodDelete, "/fapi/v1/algoOrder", params, false)
 	return err
 }
 
