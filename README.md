@@ -635,6 +635,9 @@ For running multiple AI traders competing against each other:
 | `entry_timeout_minutes` | Auto-cancel timeout for pending conditional entries | `45` | ❌ No |
 | `entry_buffer_pct` | Optional guard buffer (%) for AI trigger math | `0.03` | ❌ No |
 | `entry_price_protect` | Enable Binance priceProtect guard when sending algo orders | `true` / `false` | ❌ No |
+| `profit_guard_anchor_pct` | Profit anchor (as % of equity) before lock-in starts | `0.01` | ❌ No |
+| `profit_guard_retain_ratio` | Portion of peak profit that must be retained once anchor hit | `0.6` | ❌ No |
+| `profit_guard_min_retain_usd` | Minimum USD profit to keep even when peak较小 | `10` | ❌ No |
 | `api_server_port` | Web dashboard port | `8080` | ✅ Yes |
 
 **Default Trading Coins** (when `use_default_coins: true`):

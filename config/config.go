@@ -97,6 +97,9 @@ type TraderConfig struct {
 	SimpleTrailingFeePct       float64 `json:"simple_trailing_fee_pct,omitempty"`
 	RiskReviewEnabled          *bool   `json:"risk_review_enabled,omitempty"`
 	GuardrailStrict            bool    `json:"guardrail_strict,omitempty"`
+	ProfitGuardAnchorPct       float64 `json:"profit_guard_anchor_pct,omitempty"`
+	ProfitGuardRetainRatio     float64 `json:"profit_guard_retain_ratio,omitempty"`
+	ProfitGuardMinRetainUSD    float64 `json:"profit_guard_min_retain_usd,omitempty"`
 
 	EntryMode           string  `json:"entry_mode,omitempty"`
 	EntryWorkingType    string  `json:"entry_working_type,omitempty"`
@@ -257,6 +260,15 @@ func (c *Config) Validate() error {
 			if wt != string(futures.WorkingTypeContractPrice) && wt != string(futures.WorkingTypeMarkPrice) {
 				return fmt.Errorf("trader[%d]: entry_working_type 仅支持 CONTRACT_PRICE 或 MARK_PRICE", i)
 			}
+		}
+		if trader.ProfitGuardRetainRatio != 0 && (trader.ProfitGuardRetainRatio <= 0 || trader.ProfitGuardRetainRatio >= 1) {
+			return fmt.Errorf("trader[%d]: profit_guard_retain_ratio 需在 0-1 之间", i)
+		}
+		if trader.ProfitGuardAnchorPct < 0 {
+			return fmt.Errorf("trader[%d]: profit_guard_anchor_pct 不能为负", i)
+		}
+		if trader.ProfitGuardMinRetainUSD < 0 {
+			return fmt.Errorf("trader[%d]: profit_guard_min_retain_usd 不能为负", i)
 		}
 		if trader.TradingWindow.StartHour < 0 || trader.TradingWindow.StartHour > 23 {
 			return fmt.Errorf("trader[%d]: trading_window.start_hour 需在0-23之间", i)

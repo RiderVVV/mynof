@@ -99,6 +99,9 @@ type AutoTraderConfig struct {
 	SimpleTrailingFeePct       float64 // 回本所需收益阈值（默认0.03%即万五*2）
 	RiskReviewEnabled          bool    // 是否启用AI风控复核
 	GuardrailStrict            bool    // 守护告警是否硬拒绝
+	ProfitGuardAnchorPct       float64
+	ProfitGuardRetainRatio     float64
+	ProfitGuardMinRetainUSD    float64
 
 	EntryMode         string        // entry execution mode: market | conditional
 	EntryWorkingType  string        // MARK_PRICE / CONTRACT_PRICE
@@ -139,7 +142,6 @@ const (
 	defaultProfitProtectMinRetracePct  = 3.0  // 默认保护触发的最小回撤幅度（%）
 	defaultProfitProtectRetentionRatio = 0.5  // 默认保护时至少保留的利润比例
 	simpleTrailingActivationPct        = 0.8  // 简易守护至少需0.8%峰值收益
-	simpleTrailingDrawdownRatio        = 0.35 // 回吐金额达到风险锚点（initial_balance×3%）的35%时强制锁盈
 	simpleTrailingDefaultFeePct        = 0.03 // 默认万五双向 ≈0.03% 回本线
 	minProfitProtectPct                = 0.003
 	minProfitProtectUSD                = 1.0
@@ -202,44 +204,47 @@ type pendingEntry struct {
 
 // AutoTrader 自动交易器
 type AutoTrader struct {
-	id                    string // Trader唯一标识
-	name                  string // Trader显示名称
-	aiModel               string // AI模型名称
-	exchange              string // 交易平台名称
-	config                AutoTraderConfig
-	trader                Trader // 使用Trader接口（支持多平台）
-	mcpClient             *mcp.Client
-	decisionLogger        *logger.DecisionLogger // 决策日志记录器
-	initialBalance        float64
-	dailyPnL              float64
-	lastResetTime         time.Time
-	stopUntil             time.Time
-	isRunning             bool
-	startTime             time.Time        // 系统启动时间
-	callCount             int              // AI调用次数
-	positionFirstSeenTime map[string]int64 // 持仓首次出现时间 (symbol_side -> timestamp毫秒)
-	positionPnLHigh       map[string]float64
-	positionPnLHighUSD    map[string]float64
-	positionMinHoldUntil  map[string]time.Time
-	positionGuardStrategy map[string]string
-	ensembleMode          string
-	ensembleSummaryMode   string
-	ensembleModels        []ensembleModel
-	positionTargets       map[string]*positionManagementState
-	lastMarketData        map[string]*market.Data
-	activeContext         *decision.Context
-	maxTradeRiskUSD       float64
-	focusSymbols          []string
-	focusSymbolSet        map[string]struct{}
-	tradingWindow         config.TradingWindowConfig
-	majorEvents           []majorEventWindow
-	guardrailStrict       bool
-	entryMode             string
-	entryWorkingType      string
-	entryTimeout          time.Duration
-	entryBufferPct        float64
-	entryPriceProtect     bool
-	pendingEntries        map[string]*pendingEntry
+	id                      string // Trader唯一标识
+	name                    string // Trader显示名称
+	aiModel                 string // AI模型名称
+	exchange                string // 交易平台名称
+	config                  AutoTraderConfig
+	trader                  Trader // 使用Trader接口（支持多平台）
+	mcpClient               *mcp.Client
+	decisionLogger          *logger.DecisionLogger // 决策日志记录器
+	initialBalance          float64
+	dailyPnL                float64
+	lastResetTime           time.Time
+	stopUntil               time.Time
+	isRunning               bool
+	startTime               time.Time        // 系统启动时间
+	callCount               int              // AI调用次数
+	positionFirstSeenTime   map[string]int64 // 持仓首次出现时间 (symbol_side -> timestamp毫秒)
+	positionPnLHigh         map[string]float64
+	positionPnLHighUSD      map[string]float64
+	positionMinHoldUntil    map[string]time.Time
+	positionGuardStrategy   map[string]string
+	ensembleMode            string
+	ensembleSummaryMode     string
+	ensembleModels          []ensembleModel
+	positionTargets         map[string]*positionManagementState
+	lastMarketData          map[string]*market.Data
+	activeContext           *decision.Context
+	maxTradeRiskUSD         float64
+	focusSymbols            []string
+	focusSymbolSet          map[string]struct{}
+	tradingWindow           config.TradingWindowConfig
+	majorEvents             []majorEventWindow
+	guardrailStrict         bool
+	entryMode               string
+	entryWorkingType        string
+	entryTimeout            time.Duration
+	entryBufferPct          float64
+	entryPriceProtect       bool
+	pendingEntries          map[string]*pendingEntry
+	profitGuardAnchorPct    float64
+	profitGuardRetainRatio  float64
+	profitGuardMinRetainUSD float64
 }
 
 type profitProtectionThresholds struct {
@@ -357,6 +362,18 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 	if entryBuffer < 0 {
 		entryBuffer = 0
 	}
+	profitAnchorPct := config.ProfitGuardAnchorPct
+	if profitAnchorPct <= 0 {
+		profitAnchorPct = 0.01
+	}
+	profitRetainRatio := config.ProfitGuardRetainRatio
+	if profitRetainRatio <= 0 || profitRetainRatio >= 1 {
+		profitRetainRatio = 0.6
+	}
+	profitMinRetainUSD := config.ProfitGuardMinRetainUSD
+	if profitMinRetainUSD <= 0 {
+		profitMinRetainUSD = 10
+	}
 
 	ensembleMode := strings.TrimSpace(config.EnsembleMode)
 	if ensembleMode == "" {
@@ -425,41 +442,44 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 	}
 
 	result := &AutoTrader{
-		id:                    config.ID,
-		name:                  config.Name,
-		aiModel:               config.AIModel,
-		exchange:              config.Exchange,
-		config:                config,
-		trader:                trader,
-		mcpClient:             mcpClient,
-		decisionLogger:        decisionLogger,
-		initialBalance:        config.InitialBalance,
-		lastResetTime:         time.Now(),
-		startTime:             time.Now(),
-		callCount:             0,
-		isRunning:             false,
-		positionFirstSeenTime: make(map[string]int64),
-		positionPnLHigh:       make(map[string]float64),
-		positionPnLHighUSD:    make(map[string]float64),
-		positionMinHoldUntil:  make(map[string]time.Time),
-		positionGuardStrategy: make(map[string]string),
-		ensembleMode:          ensembleMode,
-		ensembleSummaryMode:   ensembleSummaryMode,
-		ensembleModels:        ensembleModels,
-		positionTargets:       make(map[string]*positionManagementState),
-		lastMarketData:        make(map[string]*market.Data),
-		maxTradeRiskUSD:       maxRisk,
-		focusSymbols:          focusList,
-		focusSymbolSet:        focusSet,
-		tradingWindow:         config.TradingWindow,
-		majorEvents:           majorEvents,
-		guardrailStrict:       config.GuardrailStrict,
-		entryMode:             entryMode,
-		entryWorkingType:      entryWorkingType,
-		entryTimeout:          entryTimeout,
-		entryBufferPct:        entryBuffer,
-		entryPriceProtect:     config.EntryPriceProtect,
-		pendingEntries:        make(map[string]*pendingEntry),
+		id:                      config.ID,
+		name:                    config.Name,
+		aiModel:                 config.AIModel,
+		exchange:                config.Exchange,
+		config:                  config,
+		trader:                  trader,
+		mcpClient:               mcpClient,
+		decisionLogger:          decisionLogger,
+		initialBalance:          config.InitialBalance,
+		lastResetTime:           time.Now(),
+		startTime:               time.Now(),
+		callCount:               0,
+		isRunning:               false,
+		positionFirstSeenTime:   make(map[string]int64),
+		positionPnLHigh:         make(map[string]float64),
+		positionPnLHighUSD:      make(map[string]float64),
+		positionMinHoldUntil:    make(map[string]time.Time),
+		positionGuardStrategy:   make(map[string]string),
+		ensembleMode:            ensembleMode,
+		ensembleSummaryMode:     ensembleSummaryMode,
+		ensembleModels:          ensembleModels,
+		positionTargets:         make(map[string]*positionManagementState),
+		lastMarketData:          make(map[string]*market.Data),
+		maxTradeRiskUSD:         maxRisk,
+		focusSymbols:            focusList,
+		focusSymbolSet:          focusSet,
+		tradingWindow:           config.TradingWindow,
+		majorEvents:             majorEvents,
+		guardrailStrict:         config.GuardrailStrict,
+		entryMode:               entryMode,
+		entryWorkingType:        entryWorkingType,
+		entryTimeout:            entryTimeout,
+		entryBufferPct:          entryBuffer,
+		entryPriceProtect:       config.EntryPriceProtect,
+		pendingEntries:          make(map[string]*pendingEntry),
+		profitGuardAnchorPct:    profitAnchorPct,
+		profitGuardRetainRatio:  profitRetainRatio,
+		profitGuardMinRetainUSD: profitMinRetainUSD,
 	}
 	if result.config.SimpleTrailingFeePct <= 0 {
 		result.config.SimpleTrailingFeePct = simpleTrailingDefaultFeePct
@@ -2919,16 +2939,20 @@ func (at *AutoTrader) applyProfitProtection(ctx *decision.Context, record *logge
 	var errorMessages []string
 
 	marketCache := make(map[string]*market.Data)
-	baseRiskUSD := at.initialBalance * 0.03
-	if baseRiskUSD <= 0 && ctx != nil {
-		baseRiskUSD = ctx.Account.TotalEquity * 0.03
+	profitAnchorUSD := at.profitGuardAnchorPct * at.initialBalance
+	if ctx != nil && ctx.Account.TotalEquity > 0 {
+		profitAnchorUSD = at.profitGuardAnchorPct * ctx.Account.TotalEquity
 	}
-	if baseRiskUSD <= 0 {
-		baseRiskUSD = 1
+	if profitAnchorUSD <= 0 {
+		profitAnchorUSD = at.profitGuardMinRetainUSD
 	}
-	drawdownTriggerUSD := baseRiskUSD * simpleTrailingDrawdownRatio
-	if drawdownTriggerUSD <= 0 {
-		drawdownTriggerUSD = 1
+	minRetainUSD := at.profitGuardMinRetainUSD
+	if minRetainUSD <= 0 {
+		minRetainUSD = 1
+	}
+	retainRatio := at.profitGuardRetainRatio
+	if retainRatio <= 0 || retainRatio >= 1 {
+		retainRatio = 0.6
 	}
 
 	for _, pos := range ctx.Positions {
@@ -2979,25 +3003,25 @@ func (at *AutoTrader) applyProfitProtection(ctx *decision.Context, record *logge
 		minProfitPct := math.Max(at.config.SimpleTrailingFeePct*2, simpleTrailingDefaultFeePct)
 		if at.config.SimpleTrailingGuardEnabled &&
 			peakPnL >= simpleTrailingActivationPct &&
-			peakPnLUSD >= baseRiskUSD &&
+			peakPnLUSD >= profitAnchorUSD &&
 			currentPnL >= minProfitPct {
 
-			retraceUSD := peakPnLUSD - currentPnLUSD
-			if retraceUSD < 0 {
-				retraceUSD = 0
+			retainThresholdUSD := math.Max(peakPnLUSD*retainRatio, minRetainUSD)
+			if retainThresholdUSD > peakPnLUSD {
+				retainThresholdUSD = peakPnLUSD * retainRatio
 			}
 
-			if retraceUSD >= drawdownTriggerUSD {
-				msg := fmt.Sprintf("⚡️ 简易回撤守护触发: %s %s 峰值%.2f%% (%.2f USD) → 当前%.2f%% (%.2f USD)，回吐%.2f USD ≥ %.2f USD (基于初始风险 %.2f USD)",
+			if currentPnLUSD <= retainThresholdUSD {
+				msg := fmt.Sprintf("⚡️ 利润守门启用: %s %s 峰值%.2f%% (%.2f USD) → 当前%.2f%% (%.2f USD)，低于锁盈阈值 %.2f USD (保留 %.0f%% 或至少 %.2f USD)",
 					pos.Symbol,
 					pos.Side,
 					peakPnL,
 					peakPnLUSD,
 					currentPnL,
 					currentPnLUSD,
-					retraceUSD,
-					drawdownTriggerUSD,
-					baseRiskUSD)
+					retainThresholdUSD,
+					retainRatio*100,
+					minRetainUSD)
 				log.Println(msg)
 				record.ExecutionLog = append(record.ExecutionLog, msg)
 
@@ -3019,7 +3043,7 @@ func (at *AutoTrader) applyProfitProtection(ctx *decision.Context, record *logge
 					order, err = at.trader.CloseShort(pos.Symbol, 0)
 					action = "close_short"
 				default:
-					log.Printf("  ⚠ 未知持仓方向 %s，跳过简易守护执行", pos.Side)
+					log.Printf("  ⚠ 未知持仓方向 %s，跳过利润守门执行", pos.Side)
 					continue
 				}
 
@@ -3034,7 +3058,7 @@ func (at *AutoTrader) applyProfitProtection(ctx *decision.Context, record *logge
 
 				if err != nil {
 					failedClosures++
-					errMsg := fmt.Sprintf("简易回撤守护平仓失败 %s %s: %v", pos.Symbol, pos.Side, err)
+					errMsg := fmt.Sprintf("利润守门平仓失败 %s %s: %v", pos.Symbol, pos.Side, err)
 					log.Printf("❌ %s", errMsg)
 					actionRecord.Success = false
 					actionRecord.Error = err.Error()
@@ -3046,7 +3070,7 @@ func (at *AutoTrader) applyProfitProtection(ctx *decision.Context, record *logge
 					}
 					actionRecord.Success = true
 					record.ExecutionLog = append(record.ExecutionLog,
-						fmt.Sprintf("✓ 简易回撤守护平仓: %s %s 锁定利润%.2f%% (峰值%.2f%%)",
+						fmt.Sprintf("✓ 利润守门平仓: %s %s 锁定利润%.2f%% (峰值%.2f%%)",
 							pos.Symbol, pos.Side, math.Max(currentPnL, 0), peakPnL))
 					at.clearPositionState(posKey)
 				}
