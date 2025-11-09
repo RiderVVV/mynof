@@ -116,7 +116,7 @@ const (
 	defaultProfitProtectMinRetracePct  = 3.0  // 默认保护触发的最小回撤幅度（%）
 	defaultProfitProtectRetentionRatio = 0.5  // 默认保护时至少保留的利润比例
 	simpleTrailingActivationPct        = 0.8  // 简易守护至少需0.8%峰值收益
-	simpleTrailingDrawdownRatio        = 0.35 // 峰值回撤达到35%时强制锁盈
+	simpleTrailingDrawdownRatio        = 0.35 // 回吐金额达到风险锚点（initial_balance×3%）的35%时强制锁盈
 	simpleTrailingDefaultFeePct        = 0.03 // 默认万五双向 ≈0.03% 回本线
 	minProfitProtectPct                = 0.003
 	minProfitProtectUSD                = 1.0
@@ -1012,45 +1012,26 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 			at.positionPnLHighUSD[posKey] = unrealizedPnl
 		}
 
-		drawdownFromPeakPoints := peakPnL - pnlPct
-		if drawdownFromPeakPoints < 0 {
-			drawdownFromPeakPoints = 0
-		}
-		drawdownFromPeakRatio := 0.0
-		if peakPnL > 0 {
-			drawdownFromPeakRatio = (drawdownFromPeakPoints / peakPnL) * 100
-			if drawdownFromPeakRatio < 0 {
-				drawdownFromPeakRatio = 0
-			}
-		}
 		drawdownFromPeakUSD := peakPnLUSD - unrealizedPnl
 		if drawdownFromPeakUSD < 0 {
 			drawdownFromPeakUSD = 0
 		}
 
-		notional := quantity * markPrice
-		drawdownFromPeakPctNotional := 0.0
-		if notional > 0 && drawdownFromPeakUSD > 0 {
-			drawdownFromPeakPctNotional = (drawdownFromPeakUSD / notional) * 100
-		}
-
 		positionInfos = append(positionInfos, decision.PositionInfo{
-			Symbol:                      symbol,
-			Side:                        side,
-			EntryPrice:                  entryPrice,
-			MarkPrice:                   markPrice,
-			Quantity:                    quantity,
-			Leverage:                    leverage,
-			UnrealizedPnL:               unrealizedPnl,
-			UnrealizedPnLPct:            pnlPct,
-			PeakUnrealizedPnLPct:        peakPnL,
-			PeakUnrealizedPnLUSD:        peakPnLUSD,
-			DrawdownFromPeakPct:         drawdownFromPeakRatio,
-			DrawdownFromPeakUSD:         drawdownFromPeakUSD,
-			DrawdownFromPeakPctNotional: drawdownFromPeakPctNotional,
-			LiquidationPrice:            liquidationPrice,
-			MarginUsed:                  marginUsed,
-			UpdateTime:                  updateTime,
+			Symbol:               symbol,
+			Side:                 side,
+			EntryPrice:           entryPrice,
+			MarkPrice:            markPrice,
+			Quantity:             quantity,
+			Leverage:             leverage,
+			UnrealizedPnL:        unrealizedPnl,
+			UnrealizedPnLPct:     pnlPct,
+			PeakUnrealizedPnLPct: peakPnL,
+			PeakUnrealizedPnLUSD: peakPnLUSD,
+			DrawdownFromPeakUSD:  drawdownFromPeakUSD,
+			LiquidationPrice:     liquidationPrice,
+			MarginUsed:           marginUsed,
+			UpdateTime:           updateTime,
 		})
 	}
 
@@ -2196,6 +2177,17 @@ func (at *AutoTrader) applyProfitProtection(ctx *decision.Context, record *logge
 	var errorMessages []string
 
 	marketCache := make(map[string]*market.Data)
+	baseRiskUSD := at.initialBalance * 0.03
+	if baseRiskUSD <= 0 && ctx != nil {
+		baseRiskUSD = ctx.Account.TotalEquity * 0.03
+	}
+	if baseRiskUSD <= 0 {
+		baseRiskUSD = 1
+	}
+	drawdownTriggerUSD := baseRiskUSD * simpleTrailingDrawdownRatio
+	if drawdownTriggerUSD <= 0 {
+		drawdownTriggerUSD = 1
+	}
 
 	for _, pos := range ctx.Positions {
 		posKey := pos.Symbol + "_" + pos.Side
@@ -2243,20 +2235,27 @@ func (at *AutoTrader) applyProfitProtection(ctx *decision.Context, record *logge
 		}
 
 		minProfitPct := math.Max(at.config.SimpleTrailingFeePct*2, simpleTrailingDefaultFeePct)
-		if at.config.SimpleTrailingGuardEnabled && peakPnL >= simpleTrailingActivationPct && currentPnL >= minProfitPct {
-			retrace := peakPnL - currentPnL
-			retraceRatio := 0.0
-			if peakPnL != 0 {
-				retraceRatio = retrace / peakPnL
+		if at.config.SimpleTrailingGuardEnabled &&
+			peakPnL >= simpleTrailingActivationPct &&
+			peakPnLUSD >= baseRiskUSD &&
+			currentPnL >= minProfitPct {
+
+			retraceUSD := peakPnLUSD - currentPnLUSD
+			if retraceUSD < 0 {
+				retraceUSD = 0
 			}
-			if retraceRatio >= simpleTrailingDrawdownRatio {
-				msg := fmt.Sprintf("⚡️ 简易回撤守护触发: %s %s 峰值%.2f%% → 当前%.2f%% (回撤比例 %.0f%% ≥ %.0f%%)",
+
+			if retraceUSD >= drawdownTriggerUSD {
+				msg := fmt.Sprintf("⚡️ 简易回撤守护触发: %s %s 峰值%.2f%% (%.2f USD) → 当前%.2f%% (%.2f USD)，回吐%.2f USD ≥ %.2f USD (基于初始风险 %.2f USD)",
 					pos.Symbol,
 					pos.Side,
 					peakPnL,
+					peakPnLUSD,
 					currentPnL,
-					retraceRatio*100,
-					simpleTrailingDrawdownRatio*100)
+					currentPnLUSD,
+					retraceUSD,
+					drawdownTriggerUSD,
+					baseRiskUSD)
 				log.Println(msg)
 				record.ExecutionLog = append(record.ExecutionLog, msg)
 

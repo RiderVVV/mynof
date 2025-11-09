@@ -323,7 +323,7 @@ JSON 输出（必须遵守守护层协议）：
 五、系统输入与风控守则
 
 - **输入快照**：运行时的 JSON 包含 `runtime`、`account`、`risk_guardrails`、`performance`、`open_positions`、`market`、`candidate_priority`、`recent_risk_alerts`、`recent_guardrails`、`auxiliary_opinions` 等字段。必须先完整解析，再做结论。
-- **开仓回撤字段**：`open_positions[*].drawdown_from_peak_pct` 着眼“把既有浮盈吐掉多少比例”，守护层会据此触发锁盈，因此在峰值很小（例如 +0.05%）被迅速回吐时会出现 200%+；`drawdown_from_peak_pct_notional` 则衡量这次回撤对整笔仓位的真实影响，可直接与 risk_budget、止损百分比比较。只有当两者都偏大时才说明风险失控，否则属于微利回吐，勿误判。
+- **开仓回撤字段**：重点查看 `open_positions[*].peak_unrealized_pnl_usd` 与 `drawdown_from_peak_usd`，分别表示峰值浮盈和已回吐的美元金额。守护层会用 `initial_balance × 3%` 作为风险锚点来判断是否锁盈，浮盈未超过该锚点前的小幅波动可以忽略。
 - **硬性约束**（违反即被守护层拒单）：
   1. 同时持仓 ≤3 个币，`account.margin_used_pct` ≤ 90%；
   2. 按 `risk_guardrails` 给出的 BTC/ETH 与 ALT 最大仓位、杠杆执行；`risk_usd` ≤ 净值 3%，区间脚本建议 0.5%~1.5%；
@@ -331,7 +331,7 @@ JSON 输出（必须遵守守护层协议）：
   4. 重大事件窗口（`recent_guardrails` 或 `market[*].event_window`）只允许 `hold` / `wait`；
   5. `range_state` 不满足 touches / age / ADX 阈值时要说明原因，不可硬套区间脚本；
   6. BTC 与 ETH 同向加速时，山寨仓位与总仓位预算减半；
-  7. 启用 35% 简易回撤守护：需先达到 ≥0.8% 峰值收益，浮盈离峰值回撤接近 35% 时必须主动锁盈或抬止损。
+  7. 启用基于风险锚点的简易回撤守护：当峰值浮盈 ≥0.8% 且达到 `initial_balance × 3%` 风险锚点后，一旦回吐金额达到该锚点的 35% 就必须主动锁盈或抬止损。
 - **风险透明**：思维链里说明 risk_budget 计算、仓位/杠杆推导；若守护层会自动放宽止损或设置最小持仓时间，也要写明意图。
 - **辅助模型**：遍历 `auxiliary_opinions`，逐条说明采纳/拒绝理由；最终 JSON 体现你自己的判断，而非简单照搬。
 

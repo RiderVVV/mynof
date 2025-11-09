@@ -12,8 +12,7 @@
 - `account.available_pct`：可用保证金占净值比例，配合 `margin_used_pct` 衡量余地。  
 - `risk_guardrails.max_position_usd / max_leverage`：山寨与主流币仓位、杠杆上限，已经根据净值动态计算。  
 - `risk_guardrails.performance_state`：值为 `drawdown`/`loss_streak` 时需要降频；`sharpe_cooling_level` 表示守护层已经限制新仓。  
-- `open_positions[*]`：`peak_unrealized_pnl_pct/usd` 与 `drawdown_from_peak_pct/usd` 可直接判断浮盈峰值与回撤；`hold_minutes` 实际持仓时间，守护层会约束最小值。  
-- `open_positions[*].drawdown_from_peak_pct_notional`：回撤占当前持仓名义价值的百分比，可直接与 risk_budget、止损百分比对比；与 `drawdown_from_peak_pct`（相对于历史峰值浮盈的回撤比例，用于判断守护层是否触发）结合使用。若仅因峰值很小出现 200%+ 的 `drawdown_from_peak_pct`，但名义化比例仅 0.1%，说明只是把微小利润吐掉；反之两者都偏大时才代表实质性风险。
+- `open_positions[*]`：`peak_unrealized_pnl_pct/usd` 显示峰值浮盈，`drawdown_from_peak_usd` 表示已回吐的美元金额；守护层会以 `initial_balance × 3%` 为锚点判断是否锁盈，`hold_minutes` 记录已持仓时间。  
 - `market[*].confidence_flags`：来自硬指标的资格提示，例如 `range_tradable`、`multi_tf_bearish`。  
 - `market[*].range_state`：区间脚本的关键输入——触碰次数、区间寿命 (`age_bars_1h`)、ADX (`adx14_4h`)、区间宽度与 ATR 的比值 (`width_to_atr14`)。  
 - `auxiliary_opinions`：每个辅助模型的摘要，`votes` 列出它的前几条建议（含 `strategy_hint` / `confidence` / `risk_usd`）；`weight` 和 `role` 表示它在 ensemble 中的作用。  
@@ -37,7 +36,7 @@
 7. 日内熔断：当日净亏损 ≥ min(2R, 3%净值) 时，当天余下周期全部 `wait`  
 8. 重大事件前后 ±30 分钟仅允许 `hold` / `wait`  
 9. 若 BTC 与 ETH 同向加速，山寨仓位与总仓位上限各减半  
-10. 平台已启用 35% 简易回撤守护（需先达到 ≥0.8% 峰值收益）：AI 必须与守护层同向，若浮盈从峰值回撤接近 35%，要主动收割或至少抬止损，禁止“看到回撤还抗单”
+10. 平台已启用简易回撤守护：当峰值浮盈 ≥0.8% 且 ≥ `initial_balance × 3%` 风险锚点时，一旦回吐金额达到该锚点的 35% 即触发锁盈；AI 必须配合守护层提前减仓或抬止损，禁止“看到回撤还抗单”
 
 ## 4. 多周期分析框架（先判趋势，再看区间）
 - 4H：环境判定（趋势 / 震荡 / 极端背离），追踪 swing 高低、趋势线与 ADX14。  
