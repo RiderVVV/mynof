@@ -95,6 +95,7 @@ type AutoTraderConfig struct {
 	SimpleTrailingGuardEnabled bool    // 是否启用简单回撤守护
 	SimpleTrailingFeePct       float64 // 回本所需收益阈值（默认0.03%即万五*2）
 	RiskReviewEnabled          bool    // 是否启用AI风控复核
+	GuardrailStrict            bool    // 守护告警是否硬拒绝
 }
 
 // EnsembleModelConfig 定义辅助模型的API参数
@@ -198,6 +199,7 @@ type AutoTrader struct {
 	focusSymbolSet        map[string]struct{}
 	tradingWindow         config.TradingWindowConfig
 	majorEvents           []majorEventWindow
+	guardrailStrict       bool
 }
 
 type profitProtectionThresholds struct {
@@ -390,6 +392,7 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 		focusSymbolSet:        focusSet,
 		tradingWindow:         config.TradingWindow,
 		majorEvents:           majorEvents,
+		guardrailStrict:       config.GuardrailStrict,
 	}
 	if result.config.SimpleTrailingFeePct <= 0 {
 		result.config.SimpleTrailingFeePct = simpleTrailingDefaultFeePct
@@ -3135,13 +3138,16 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 
 	at.applyDrawdownPositionControls(decision, "long")
 
-	minHoldDuration, guardStrategy, guardErr := at.applyOpenGuard(decision, marketData, "long")
-	if guardErr != nil {
-		if strings.Contains(guardErr.Error(), "range guard") {
-			log.Printf("  ℹ️ 区间守护提示: %v，按AI方案继续执行", guardErr)
-		} else {
+	minHoldDuration := 45 * time.Minute
+	guardStrategy := "trend"
+	if md, gs, guardErr := at.applyOpenGuard(decision, marketData, "long"); guardErr != nil {
+		if at.guardrailStrict {
 			return guardErr
 		}
+		log.Printf("  ⚠️ 守护提示: %v，按AI方案继续执行", guardErr)
+	} else {
+		minHoldDuration = md
+		guardStrategy = gs
 	}
 	livePrice := marketData.CurrentPrice
 	if ask, err := at.trader.GetMarketPrice(decision.Symbol); err == nil && ask > 0 {
@@ -3240,13 +3246,16 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
 
 	at.applyDrawdownPositionControls(decision, "short")
 
-	minHoldDuration, guardStrategy, guardErr := at.applyOpenGuard(decision, marketData, "short")
-	if guardErr != nil {
-		if strings.Contains(guardErr.Error(), "range guard") {
-			log.Printf("  ℹ️ 区间守护提示: %v，按AI方案继续执行", guardErr)
-		} else {
+	minHoldDuration := 45 * time.Minute
+	guardStrategy := "trend"
+	if md, gs, guardErr := at.applyOpenGuard(decision, marketData, "short"); guardErr != nil {
+		if at.guardrailStrict {
 			return guardErr
 		}
+		log.Printf("  ⚠️ 守护提示: %v，按AI方案继续执行", guardErr)
+	} else {
+		minHoldDuration = md
+		guardStrategy = gs
 	}
 	livePrice := marketData.CurrentPrice
 	if price, err := at.trader.GetMarketPrice(decision.Symbol); err == nil && price > 0 {

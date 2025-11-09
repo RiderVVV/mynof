@@ -94,6 +94,7 @@ type TraderConfig struct {
 	SimpleTrailingGuardEnabled *bool   `json:"simple_trailing_guard_enabled,omitempty"`
 	SimpleTrailingFeePct       float64 `json:"simple_trailing_fee_pct,omitempty"`
 	RiskReviewEnabled          *bool   `json:"risk_review_enabled,omitempty"`
+	GuardrailStrict            bool    `json:"guardrail_strict,omitempty"`
 }
 
 // LeverageConfig 杠杆配置
