@@ -1635,18 +1635,23 @@ func (at *AutoTrader) enforceOpenRisk(decision *decision.Decision, livePrice flo
 		return nil, fmt.Errorf("无法计算风险预算")
 	}
 
+	entryPrice := at.plannedEntryPrice(decision, livePrice)
+	if entryPrice <= 0 {
+		return nil, fmt.Errorf("无法确定计划入场价")
+	}
+
 	var stopDistance float64
 	switch strings.ToLower(side) {
 	case "long":
-		if decision.StopLoss >= livePrice {
-			return nil, fmt.Errorf("多单止损必须低于现价")
+		if decision.StopLoss >= entryPrice {
+			return nil, fmt.Errorf("多单止损必须低于计划入场价")
 		}
-		stopDistance = livePrice - decision.StopLoss
+		stopDistance = entryPrice - decision.StopLoss
 	case "short":
-		if decision.StopLoss <= livePrice {
-			return nil, fmt.Errorf("空单止损必须高于现价")
+		if decision.StopLoss <= entryPrice {
+			return nil, fmt.Errorf("空单止损必须高于计划入场价")
 		}
-		stopDistance = decision.StopLoss - livePrice
+		stopDistance = decision.StopLoss - entryPrice
 	default:
 		return nil, fmt.Errorf("未知方向: %s", side)
 	}
@@ -1655,12 +1660,12 @@ func (at *AutoTrader) enforceOpenRisk(decision *decision.Decision, livePrice flo
 		return nil, fmt.Errorf("止损距离必须大于0")
 	}
 
-	stopDistancePct := (stopDistance / livePrice) * 100
+	stopDistancePct := (stopDistance / entryPrice) * 100
 	if minStopDistancePct > 0 && stopDistancePct < minStopDistancePct {
 		return nil, fmt.Errorf("止损距离 %.4f%% 低于最小阈值 %.2f%%", stopDistancePct, minStopDistancePct)
 	}
 
-	riskUSD := decision.PositionSizeUSD * (stopDistance / livePrice)
+	riskUSD := decision.PositionSizeUSD * (stopDistance / entryPrice)
 	if riskUSD <= 0 {
 		return nil, fmt.Errorf("计算risk_usd失败")
 	}
@@ -1676,7 +1681,7 @@ func (at *AutoTrader) enforceOpenRisk(decision *decision.Decision, livePrice flo
 		if decision.RiskUSD > 0 {
 			decision.RiskUSD = decision.RiskUSD * scale
 		}
-		riskUSD = decision.PositionSizeUSD * (stopDistance / livePrice)
+		riskUSD = decision.PositionSizeUSD * (stopDistance / entryPrice)
 	}
 
 	if decision.TakeProfit <= 0 {
@@ -1686,15 +1691,15 @@ func (at *AutoTrader) enforceOpenRisk(decision *decision.Decision, livePrice flo
 	var rewardDistance float64
 	switch strings.ToLower(side) {
 	case "long":
-		if decision.TakeProfit <= livePrice {
-			return nil, fmt.Errorf("多单止盈必须高于现价")
+		if decision.TakeProfit <= entryPrice {
+			return nil, fmt.Errorf("多单止盈必须高于计划入场价")
 		}
-		rewardDistance = decision.TakeProfit - livePrice
+		rewardDistance = decision.TakeProfit - entryPrice
 	case "short":
-		if decision.TakeProfit >= livePrice {
-			return nil, fmt.Errorf("空单止盈必须低于现价")
+		if decision.TakeProfit >= entryPrice {
+			return nil, fmt.Errorf("空单止盈必须低于计划入场价")
 		}
-		rewardDistance = livePrice - decision.TakeProfit
+		rewardDistance = entryPrice - decision.TakeProfit
 	}
 
 	rewardToRisk := rewardDistance / stopDistance
@@ -2651,6 +2656,28 @@ func (at *AutoTrader) validateEntryBuffer(decision *decision.Decision, livePrice
 	}
 
 	return nil
+}
+
+func (at *AutoTrader) plannedEntryPrice(decision *decision.Decision, livePrice float64) float64 {
+	if decision == nil {
+		return livePrice
+	}
+
+	entryType := strings.ToLower(strings.TrimSpace(decision.EntryType))
+	if at.conditionalEntriesEnabled() {
+		switch entryType {
+		case "stop", "stop_limit", "stop_market", "take_profit", "take_profit_market":
+			if decision.EntryPrice > 0 {
+				return decision.EntryPrice
+			}
+		case "trailing_stop_market":
+			if decision.EntryActivation > 0 {
+				return decision.EntryActivation
+			}
+		}
+	}
+
+	return livePrice
 }
 
 func (at *AutoTrader) adjustTargetPriceForRange(symbol, side, strategy string, price float64, data *market.Data) float64 {
