@@ -21,7 +21,7 @@ const (
 	minOrderNotionalUSD      = 5.1   // 略高于交易所 5 USDT 的硬性下限，避免因边界舍入被拒单
 	riskBudgetFraction       = 0.03  // 默认风险预算（3%净值）
 	coolingRiskFraction      = 0.015 // 冷却阶段风险预算减半
-	minStopDistancePct       = 0.8   // 止损至少距离现价0.8%
+	minStopDistancePct       = 0.0   // 止损距离下限（0 = 不限制）
 	maxSnapshotDriftPct      = 0.2   // 决策生成到执行的最大允许价格偏移(%)
 	defaultMinRewardToRisk   = 3.0   // 默认最小盈亏比
 	coolingMinRewardToRisk   = 4.0   // 冷却阶段最小盈亏比
@@ -1428,13 +1428,6 @@ func (at *AutoTrader) enforceOpenRisk(decision *decision.Decision, livePrice flo
 		return nil, fmt.Errorf("无法计算风险预算")
 	}
 
-	var atr14 float64
-	if ctx != nil && ctx.MarketDataMap != nil {
-		if data, ok := ctx.MarketDataMap[strings.ToUpper(decision.Symbol)]; ok && data != nil && data.LongerTermContext != nil {
-			atr14 = data.LongerTermContext.ATR14
-		}
-	}
-
 	var stopDistance float64
 	switch strings.ToLower(side) {
 	case "long":
@@ -1451,13 +1444,13 @@ func (at *AutoTrader) enforceOpenRisk(decision *decision.Decision, livePrice flo
 		return nil, fmt.Errorf("未知方向: %s", side)
 	}
 
-	stopDistancePct := (stopDistance / livePrice) * 100
-	if stopDistancePct < minStopDistancePct {
-		return nil, fmt.Errorf("止损距离 %.4f%% 低于最小阈值 %.2f%%", stopDistancePct, minStopDistancePct)
+	if stopDistance <= 0 {
+		return nil, fmt.Errorf("止损距离必须大于0")
 	}
 
-	if atr14 > 0 && stopDistance < atr14 {
-		return nil, fmt.Errorf("止损距离 %.4f 低于4h ATR %.4f", stopDistance, atr14)
+	stopDistancePct := (stopDistance / livePrice) * 100
+	if minStopDistancePct > 0 && stopDistancePct < minStopDistancePct {
+		return nil, fmt.Errorf("止损距离 %.4f%% 低于最小阈值 %.2f%%", stopDistancePct, minStopDistancePct)
 	}
 
 	riskUSD := decision.PositionSizeUSD * (stopDistance / livePrice)
