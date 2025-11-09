@@ -608,6 +608,11 @@ func (t *HyperliquidTrader) CancelAllConditionalOrders(symbol string) error {
 	return ErrConditionalOrdersUnsupported
 }
 
+func (t *HyperliquidTrader) GetSymbolTickSize(symbol string) (float64, error) {
+	// Hyperliquid 当前API未提供统一的tick size定义，返回0表示由上层忽略该分量
+	return 0, nil
+}
+
 // getSzDecimals 获取币种的数量精度
 func (t *HyperliquidTrader) getSzDecimals(coin string) int {
 	if t.meta == nil {

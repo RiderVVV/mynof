@@ -2557,6 +2557,102 @@ func (at *AutoTrader) shouldUseConditionalEntry(decision *decision.Decision) (fu
 	return orderType, true
 }
 
+func (at *AutoTrader) computeEntryBufferPct(symbol string, marketData *market.Data, livePrice float64) float64 {
+	buffer := at.entryBufferPct
+	if buffer <= 0 {
+		buffer = 0.003
+	} else if buffer < 0.003 {
+		buffer = 0.003
+	}
+
+	if atrPct := extractAtrPercent(marketData); atrPct > 0 {
+		atrComponent := (atrPct * 0.5) / 100
+		if atrComponent > buffer {
+			buffer = atrComponent
+		}
+	}
+
+	if tickComponent := at.estimateTickBufferPct(symbol, livePrice); tickComponent > buffer {
+		buffer = tickComponent
+	}
+
+	return buffer
+}
+
+func (at *AutoTrader) estimateTickBufferPct(symbol string, livePrice float64) float64 {
+	if at.trader == nil || livePrice <= 0 {
+		return 0
+	}
+	tickSize, err := at.trader.GetSymbolTickSize(symbol)
+	if err != nil || tickSize <= 0 {
+		return 0
+	}
+	return (tickSize / livePrice) * 2
+}
+
+func isStopStyleOrder(orderType futures.OrderType) bool {
+	return orderType == futures.OrderTypeStop ||
+		orderType == futures.OrderTypeStopMarket ||
+		orderType == futures.OrderTypeTrailingStopMarket
+}
+
+func isTakeProfitStyleOrder(orderType futures.OrderType) bool {
+	return orderType == futures.OrderTypeTakeProfit ||
+		orderType == futures.OrderTypeTakeProfitMarket
+}
+
+func (at *AutoTrader) validateEntryBuffer(decision *decision.Decision, livePrice float64, marketData *market.Data, orderType futures.OrderType) error {
+	if decision == nil || livePrice <= 0 {
+		return nil
+	}
+	triggerPrice := decision.EntryPrice
+	if orderType == futures.OrderTypeTrailingStopMarket {
+		triggerPrice = decision.EntryActivation
+	}
+	if triggerPrice <= 0 {
+		return fmt.Errorf("entry_mode=conditional 需要有效触发价")
+	}
+
+	bufferPct := at.computeEntryBufferPct(decision.Symbol, marketData, livePrice)
+	minAbove := livePrice * (1 + bufferPct)
+	maxBelow := livePrice * (1 - bufferPct)
+
+	action := strings.ToLower(decision.Action)
+	isStop := isStopStyleOrder(orderType)
+	isTP := isTakeProfitStyleOrder(orderType)
+
+	switch action {
+	case "open_long":
+		switch {
+		case isStop:
+			if triggerPrice < minAbove {
+				actual := math.Abs((triggerPrice - livePrice) / livePrice * 100)
+				return fmt.Errorf("触发价 %.4f 距现价 %.4f 仅 %.2f%%，低于安全距离 %.2f%%，请抬高触发价", triggerPrice, livePrice, actual, bufferPct*100)
+			}
+		case isTP:
+			if triggerPrice > maxBelow {
+				actual := math.Abs((livePrice - triggerPrice) / livePrice * 100)
+				return fmt.Errorf("触发价 %.4f 距现价 %.4f 仅 %.2f%%，需要至少 %.2f%% 的回踩空间", triggerPrice, livePrice, actual, bufferPct*100)
+			}
+		}
+	case "open_short":
+		switch {
+		case isStop:
+			if triggerPrice > maxBelow {
+				actual := math.Abs((triggerPrice - livePrice) / livePrice * 100)
+				return fmt.Errorf("触发价 %.4f 距现价 %.4f 仅 %.2f%%，空单追跌需至少 %.2f%% 安全距离", triggerPrice, livePrice, actual, bufferPct*100)
+			}
+		case isTP:
+			if triggerPrice < minAbove {
+				actual := math.Abs((livePrice - triggerPrice) / livePrice * 100)
+				return fmt.Errorf("触发价 %.4f 距现价 %.4f 仅 %.2f%%，空单挂高位需至少 %.2f%% 缓冲", triggerPrice, livePrice, actual, bufferPct*100)
+			}
+		}
+	}
+
+	return nil
+}
+
 func (at *AutoTrader) adjustTargetPriceForRange(symbol, side, strategy string, price float64, data *market.Data) float64 {
 	if price <= 0 || data == nil || data.RangeState == nil {
 		return price
@@ -3636,6 +3732,9 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 	actionRecord.Price = livePrice
 
 	if orderType, ok := at.shouldUseConditionalEntry(decision); ok {
+		if err := at.validateEntryBuffer(decision, livePrice, marketData, orderType); err != nil {
+			return err
+		}
 		if err := at.placeConditionalOpen(decision, actionRecord, quantity, orderType, futures.SideTypeBuy, futures.PositionSideTypeLong, minHoldDuration, guardStrategy); err != nil {
 			if errors.Is(err, ErrConditionalOrdersUnsupported) {
 				log.Printf("⚠️ 条件单接口不可用，回退为市价下单: %v", err)
@@ -3757,6 +3856,9 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
 	actionRecord.Price = livePrice
 
 	if orderType, ok := at.shouldUseConditionalEntry(decision); ok {
+		if err := at.validateEntryBuffer(decision, livePrice, marketData, orderType); err != nil {
+			return err
+		}
 		if err := at.placeConditionalOpen(decision, actionRecord, quantity, orderType, futures.SideTypeSell, futures.PositionSideTypeShort, minHoldDuration, guardStrategy); err != nil {
 			if errors.Is(err, ErrConditionalOrdersUnsupported) {
 				log.Printf("⚠️ 条件单接口不可用，回退为市价下单: %v", err)

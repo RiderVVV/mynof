@@ -629,6 +629,32 @@ func (t *FuturesTrader) FormatQuantity(symbol string, quantity float64) (string,
 	return fmt.Sprintf(format, quantity), nil
 }
 
+// GetSymbolTickSize 获取交易对的最小价格步进
+func (t *FuturesTrader) GetSymbolTickSize(symbol string) (float64, error) {
+	exchangeInfo, err := t.client.NewExchangeInfoService().Do(context.Background())
+	if err != nil {
+		return 0, fmt.Errorf("获取交易规则失败: %w", err)
+	}
+
+	for _, s := range exchangeInfo.Symbols {
+		if strings.EqualFold(s.Symbol, symbol) {
+			for _, filter := range s.Filters {
+				if filter["filterType"] == "PRICE_FILTER" {
+					if tickSizeStr, ok := filter["tickSize"].(string); ok {
+						val, parseErr := strconv.ParseFloat(tickSizeStr, 64)
+						if parseErr != nil {
+							return 0, parseErr
+						}
+						return val, nil
+					}
+				}
+			}
+		}
+	}
+
+	return 0, fmt.Errorf("未找到 %s 的 tick size", symbol)
+}
+
 func (t *FuturesTrader) PlaceConditionalOrder(req *ConditionalOrderRequest) (*ConditionalOrderResponse, error) {
 	if req == nil {
 		return nil, fmt.Errorf("conditional order request cannot be nil")

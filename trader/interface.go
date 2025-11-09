@@ -52,6 +52,9 @@ type Trader interface {
 
 	// CancelAllConditionalOrders 取消某交易对下所有条件单
 	CancelAllConditionalOrders(symbol string) error
+
+	// GetSymbolTickSize 返回该交易对的最小价格步长（若不支持则返回0）
+	GetSymbolTickSize(symbol string) (float64, error)
 }
 
 // ErrConditionalOrdersUnsupported 表示交易器未实现条件单接口

@@ -958,6 +958,14 @@ func (t *AsterTrader) FormatQuantity(symbol string, quantity float64) (string, e
 	return fmt.Sprintf("%v", formatted), nil
 }
 
+func (t *AsterTrader) GetSymbolTickSize(symbol string) (float64, error) {
+	prec, err := t.getPrecision(symbol)
+	if err != nil {
+		return 0, err
+	}
+	return prec.TickSize, nil
+}
+
 func (t *AsterTrader) PlaceConditionalOrder(req *ConditionalOrderRequest) (*ConditionalOrderResponse, error) {
 	return nil, ErrConditionalOrdersUnsupported
 }
