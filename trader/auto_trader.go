@@ -2416,14 +2416,25 @@ func (at *AutoTrader) resolveEntryWorkingType(decision *decision.Decision) strin
 	return at.entryWorkingType
 }
 
-func (at *AutoTrader) resolveEntryTimeout(decision *decision.Decision) time.Duration {
+func (at *AutoTrader) resolveEntryTimeout(decision *decision.Decision, triggerPrice, livePrice float64) time.Duration {
 	if decision != nil && decision.EntryTimeoutMins > 0 {
 		return time.Duration(decision.EntryTimeoutMins) * time.Minute
 	}
 	if at.entryTimeout > 0 {
 		return at.entryTimeout
 	}
-	return defaultConditionalEntryTimeout
+	timeout := defaultConditionalEntryTimeout
+	if triggerPrice > 0 && livePrice > 0 {
+		distancePct := math.Abs(triggerPrice-livePrice) / livePrice * 100
+		if distancePct > 0 {
+			minMinutes := int(math.Max(30, math.Min(240, distancePct*120)))
+			required := time.Duration(minMinutes) * time.Minute
+			if required > timeout {
+				timeout = required
+			}
+		}
+	}
+	return timeout
 }
 
 func (at *AutoTrader) resolveEntryPriceProtect(decision *decision.Decision) bool {
@@ -3601,7 +3612,7 @@ func (at *AutoTrader) executeDecisionWithRecord(decision *decision.Decision, act
 	}
 }
 
-func (at *AutoTrader) placeConditionalOpen(plan *decision.Decision, actionRecord *logger.DecisionAction, quantity float64, orderType futures.OrderType, side futures.SideType, positionSide futures.PositionSideType, minHoldDuration time.Duration, guardStrategy string) error {
+func (at *AutoTrader) placeConditionalOpen(plan *decision.Decision, actionRecord *logger.DecisionAction, quantity float64, livePrice float64, orderType futures.OrderType, side futures.SideType, positionSide futures.PositionSideType, minHoldDuration time.Duration, guardStrategy string) error {
 	if plan == nil {
 		return fmt.Errorf("decision is nil")
 	}
@@ -3621,10 +3632,14 @@ func (at *AutoTrader) placeConditionalOpen(plan *decision.Decision, actionRecord
 		ClientAlgoID: fmt.Sprintf("nofx-%s-%d", strings.ToLower(plan.Symbol), time.Now().UnixNano()),
 		PriceProtect: at.resolveEntryPriceProtect(plan),
 	}
+	triggerValue := plan.EntryPrice
 	switch orderType {
 	case futures.OrderTypeTrailingStopMarket:
 		req.ActivationPrice = formatPriceString(plan.EntryActivation)
 		req.CallbackRate = formatPriceString(plan.EntryCallbackRate)
+		if plan.EntryActivation > 0 {
+			triggerValue = plan.EntryActivation
+		}
 	default:
 		req.TriggerPrice = formatPriceString(plan.EntryPrice)
 		limitPrice := plan.EntryLimitPrice
@@ -3635,15 +3650,12 @@ func (at *AutoTrader) placeConditionalOpen(plan *decision.Decision, actionRecord
 			req.Price = formatPriceString(limitPrice)
 		}
 	}
+	entryTimeout := at.resolveEntryTimeout(plan, triggerValue, livePrice)
 	resp, err := at.trader.PlaceConditionalOrder(req)
 	if err != nil {
 		return err
 	}
 	key := positionKey(plan.Symbol, strings.ToLower(string(positionSide)))
-	triggerValue := plan.EntryPrice
-	if orderType == futures.OrderTypeTrailingStopMarket && plan.EntryActivation > 0 {
-		triggerValue = plan.EntryActivation
-	}
 	orderTypeLabel := resp.OrderType
 	if orderTypeLabel == "" {
 		orderTypeLabel = string(orderType)
@@ -3669,7 +3681,7 @@ func (at *AutoTrader) placeConditionalOpen(plan *decision.Decision, actionRecord
 		GuardStrategy:     guardStrategy,
 		MinHoldDuration:   minHoldDuration,
 		CreatedAt:         time.Now(),
-		ExpiresAt:         time.Now().Add(at.resolveEntryTimeout(plan)),
+		ExpiresAt:         time.Now().Add(entryTimeout),
 		WorkingType:       string(workingType),
 		PriceProtect:      at.resolveEntryPriceProtect(plan),
 		Status:            resp.AlgoStatus,
@@ -3762,7 +3774,7 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 		if err := at.validateEntryBuffer(decision, livePrice, marketData, orderType); err != nil {
 			return err
 		}
-		if err := at.placeConditionalOpen(decision, actionRecord, quantity, orderType, futures.SideTypeBuy, futures.PositionSideTypeLong, minHoldDuration, guardStrategy); err != nil {
+		if err := at.placeConditionalOpen(decision, actionRecord, quantity, livePrice, orderType, futures.SideTypeBuy, futures.PositionSideTypeLong, minHoldDuration, guardStrategy); err != nil {
 			if errors.Is(err, ErrConditionalOrdersUnsupported) {
 				log.Printf("⚠️ 条件单接口不可用，回退为市价下单: %v", err)
 			} else {
@@ -3886,7 +3898,7 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
 		if err := at.validateEntryBuffer(decision, livePrice, marketData, orderType); err != nil {
 			return err
 		}
-		if err := at.placeConditionalOpen(decision, actionRecord, quantity, orderType, futures.SideTypeSell, futures.PositionSideTypeShort, minHoldDuration, guardStrategy); err != nil {
+		if err := at.placeConditionalOpen(decision, actionRecord, quantity, livePrice, orderType, futures.SideTypeSell, futures.PositionSideTypeShort, minHoldDuration, guardStrategy); err != nil {
 			if errors.Is(err, ErrConditionalOrdersUnsupported) {
 				log.Printf("⚠️ 条件单接口不可用，回退为市价下单: %v", err)
 			} else {
