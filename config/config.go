@@ -101,11 +101,12 @@ type TraderConfig struct {
 	ProfitGuardRetainRatio     float64 `json:"profit_guard_retain_ratio,omitempty"`
 	ProfitGuardMinRetainUSD    float64 `json:"profit_guard_min_retain_usd,omitempty"`
 
-	EntryMode           string  `json:"entry_mode,omitempty"`
-	EntryWorkingType    string  `json:"entry_working_type,omitempty"`
-	EntryTimeoutMinutes int     `json:"entry_timeout_minutes,omitempty"`
-	EntryBufferPct      float64 `json:"entry_buffer_pct,omitempty"`
-	EntryPriceProtect   bool    `json:"entry_price_protect,omitempty"`
+	EntryMode                string   `json:"entry_mode,omitempty"`
+	EntryWorkingType         string   `json:"entry_working_type,omitempty"`
+	EntryTimeoutMinutes      int      `json:"entry_timeout_minutes,omitempty"`
+	EntryBufferPct           float64  `json:"entry_buffer_pct,omitempty"`
+	EntryATRBufferMultiplier *float64 `json:"entry_atr_buffer_multiplier,omitempty"`
+	EntryPriceProtect        bool     `json:"entry_price_protect,omitempty"`
 }
 
 // LeverageConfig 杠杆配置
@@ -255,6 +256,9 @@ func (c *Config) Validate() error {
 		if trader.EntryBufferPct < 0 {
 			return fmt.Errorf("trader[%d]: entry_buffer_pct 不能为负", i)
 		}
+		if trader.EntryATRBufferMultiplier != nil && *trader.EntryATRBufferMultiplier < 0 {
+			return fmt.Errorf("trader[%d]: entry_atr_buffer_multiplier 不能为负", i)
+		}
 		if trader.EntryWorkingType != "" {
 			wt := strings.ToUpper(strings.TrimSpace(trader.EntryWorkingType))
 			if wt != string(futures.WorkingTypeContractPrice) && wt != string(futures.WorkingTypeMarkPrice) {
@@ -398,6 +402,17 @@ func (tc *TraderConfig) GetEntryBufferPct() float64 {
 		return 0
 	}
 	return tc.EntryBufferPct
+}
+
+// GetEntryATRBufferMultiplier 返回ATR缓冲倍数
+func (tc *TraderConfig) GetEntryATRBufferMultiplier() float64 {
+	if tc.EntryATRBufferMultiplier == nil {
+		return 0.5
+	}
+	if *tc.EntryATRBufferMultiplier < 0 {
+		return 0.5
+	}
+	return *tc.EntryATRBufferMultiplier
 }
 
 // EntryPriceProtectionEnabled 是否启用触发价保护

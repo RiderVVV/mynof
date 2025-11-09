@@ -103,11 +103,12 @@ type AutoTraderConfig struct {
 	ProfitGuardRetainRatio     float64
 	ProfitGuardMinRetainUSD    float64
 
-	EntryMode         string        // entry execution mode: market | conditional
-	EntryWorkingType  string        // MARK_PRICE / CONTRACT_PRICE
-	EntryTimeout      time.Duration // default conditional order timeout
-	EntryBufferPct    float64       // optional trigger buffer ratio
-	EntryPriceProtect bool          // enable priceProtect flag when supported
+	EntryMode                string        // entry execution mode: market | conditional
+	EntryWorkingType         string        // MARK_PRICE / CONTRACT_PRICE
+	EntryTimeout             time.Duration // default conditional order timeout
+	EntryBufferPct           float64       // optional trigger buffer ratio
+	EntryATRBufferMultiplier float64       // optional ATR buffer multiplier
+	EntryPriceProtect        bool          // enable priceProtect flag when supported
 }
 
 // EnsembleModelConfig 定义辅助模型的API参数
@@ -240,6 +241,7 @@ type AutoTrader struct {
 	entryWorkingType        string
 	entryTimeout            time.Duration
 	entryBufferPct          float64
+	entryATRMultiplier      float64
 	entryPriceProtect       bool
 	pendingEntries          map[string]*pendingEntry
 	profitGuardAnchorPct    float64
@@ -362,6 +364,10 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 	if entryBuffer < 0 {
 		entryBuffer = 0
 	}
+	entryATRMultiplier := config.EntryATRBufferMultiplier
+	if entryATRMultiplier < 0 {
+		entryATRMultiplier = 0.5
+	}
 	profitAnchorPct := config.ProfitGuardAnchorPct
 	if profitAnchorPct <= 0 {
 		profitAnchorPct = 0.01
@@ -475,6 +481,7 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 		entryWorkingType:        entryWorkingType,
 		entryTimeout:            entryTimeout,
 		entryBufferPct:          entryBuffer,
+		entryATRMultiplier:      entryATRMultiplier,
 		entryPriceProtect:       config.EntryPriceProtect,
 		pendingEntries:          make(map[string]*pendingEntry),
 		profitGuardAnchorPct:    profitAnchorPct,
@@ -2581,8 +2588,8 @@ func (at *AutoTrader) computeEntryBufferPct(symbol string, marketData *market.Da
 		buffer = 0.003
 	}
 
-	if atrPct := extractAtrPercent(marketData); atrPct > 0 {
-		atrComponent := (atrPct * 0.5) / 100
+	if atrPct := extractAtrPercent(marketData); atrPct > 0 && at.entryATRMultiplier > 0 {
+		atrComponent := (atrPct * at.entryATRMultiplier) / 100
 		if atrComponent > buffer {
 			buffer = atrComponent
 		}
