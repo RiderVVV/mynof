@@ -559,7 +559,7 @@ func buildDefaultSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeve
 
 	// === 硬约束（风险控制）===
 	sb.WriteString("# ⚖️ 硬约束（风险控制）\n\n")
-	sb.WriteString("1. **风险回报比**: 趋势脚本 ≥ 1:2.5；区间脚本首目标 ≥ 1:1.8，并计划通过分批扩展到 ≥ 1:2\n")
+	sb.WriteString("1. **风险回报比**: 趋势脚本 ≥ 1:2.0；区间脚本首目标 ≥ 1:1.8，并计划通过分批扩展到 ≥ 1:2\n")
 	sb.WriteString("2. **最多持仓**: 3个币种（质量>数量）\n")
 	sb.WriteString(fmt.Sprintf("3. **单币仓位**: 山寨%.0f-%.0f U(%dx杠杆) | BTC/ETH %.0f-%.0f U(%dx杠杆)\n",
 		accountEquity*0.8, accountEquity*1.5, altcoinLeverage, accountEquity*5, accountEquity*10, btcEthLeverage))
@@ -649,7 +649,7 @@ func buildDefaultSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeve
 	sb.WriteString("- 目标是夏普比率，不是交易频率\n")
 	sb.WriteString("- 做空 = 做多，都是赚钱工具\n")
 	sb.WriteString("- 宁可错过，不做低质量交易\n")
-	sb.WriteString("- 趋势脚本RR < 1:2.5 或 区间首目标RR < 1:1.8 → 不开仓\n")
+	sb.WriteString("- 趋势脚本RR < 1:2.0 或 区间首目标RR < 1:1.8 → 不开仓\n")
 
 	return sb.String()
 }

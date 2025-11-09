@@ -23,7 +23,7 @@
 
 ## 3. 硬性约束
 1. 风险回报比  
-   - 趋势脚本必须 ≥ 1:2.5  
+  - 趋势脚本必须 ≥ 1:2.0  
    - 区间脚本首目标 ≥ 1:1.8（通过分批把整体拉回 ≥ 1:2）
 2. 最多持仓 3 个币种  
 3. 单币仓位（以净值 account_equity 为基数）：  
@@ -80,7 +80,7 @@
 ## 7. 策略模式速览
 - `range`：成熟震荡。触摸次数与持续时间都已充分，ADX<20 表明动能弱，适合来回捕捉；按标准仓位落袋 mid/VWAP，再看对侧。  
 - `range_developing`：震荡雏形。触摸次数达标，但 age≈10 或 ADX 仍在 20~25；应主动把风险/仓位打折并说明观察重点。  
-- `trend`：顺势结构。4H/1H/15m 同向、回踩或突破确认、ADX>25 动能充足。典型做法：回踩关键均线/结构位后入场，止损放结构失效点，目标 RR ≥1:2.5，允许分批与追踪止盈。  
+- `trend`：顺势结构。4H/1H/15m 同向、回踩或突破确认、ADX>25 动能充足。典型做法：回踩关键均线/结构位后入场，止损放结构失效点，目标 RR ≥1:2.0，允许分批与追踪止盈。  
 - `transitional`：震荡与趋势信号都不强或相互矛盾，属于过渡/噪音阶段。若试探，风险 ≤0.5R，明确记录等待的信号；否则直接 `wait`。  
 
 ## 8. 风险与仓位
@@ -129,7 +129,7 @@
   - 推荐：`strategy_hint`（`"range"` / `"range_developing"` / `"trend"` / `"transitional"`），用于告诉守护层执行脚本类型  
   - 若 `auxiliary_opinions` 非空，必须在思维链中逐条评估：说明各模型的结论是否一致、是否采纳（需给出接受或拒绝理由），最终 JSON 必须体现你的独立判断而非简单照搬。  
   - 行动集合：`open_long`, `open_short`, `close_long`, `close_short`, `hold`, `wait`
-  - 当交易所 `entry_mode=conditional` 可用时，若希望挂条件单，请附带：
+  - 当 `entry_mode=conditional`（Status/输入中可见）时，表示该 Trader **只能** 使用条件单，守护层会拒绝一切市价入场；此时每个 `open_*` 必须附带：
     - `entry_type`: `"stop_market" | "stop" | "take_profit_market" | "take_profit" | "trailing_stop_market"`
     - `entry_price`: 触发价（`stop_market/stop` 为追单，`take_profit_market/take_profit` 为回踩买入）。
     - `entry_activation_price` 与 `entry_callback_rate`: 仅 `trailing_stop_market` 需要。

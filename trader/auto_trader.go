@@ -26,8 +26,8 @@ const (
 	coolingRiskFraction      = 0.015 // 冷却阶段风险预算减半
 	minStopDistancePct       = 0.0   // 止损距离下限（0 = 不限制）
 	maxSnapshotDriftPct      = 0.2   // 决策生成到执行的最大允许价格偏移(%)
-	defaultMinRewardToRisk   = 3.0   // 默认最小盈亏比
-	coolingMinRewardToRisk   = 4.0   // 冷却阶段最小盈亏比
+	defaultMinRewardToRisk   = 2.0   // 默认最小盈亏比
+	coolingMinRewardToRisk   = 3.0   // 冷却阶段最小盈亏比
 	coolingConfidenceMinimum = 80    // 冷却阶段最小信心
 )
 
