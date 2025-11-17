@@ -142,7 +142,18 @@ export const api = {
       },
       body: JSON.stringify(payload),
     });
-    if (!res.ok) throw new Error('获取AI咨询建议失败');
+    if (!res.ok) {
+      let message = '获取AI咨询建议失败';
+      try {
+        const data = await res.json();
+        if (data && typeof data === 'object' && 'error' in data && typeof (data as any).error === 'string') {
+          message = (data as any).error;
+        }
+      } catch {
+        // ignore JSON parse errors
+      }
+      throw new Error(message);
+    }
     return res.json();
   },
 
