@@ -42,6 +42,22 @@ const formatActionLabel = (action?: string, language?: Language) => {
   }
 };
 
+const clampLeverage = (input: string): number => {
+  const numberValue = Number(input);
+  if (!Number.isFinite(numberValue) || numberValue <= 0) {
+    return 5;
+  }
+  return Math.max(1, Math.min(125, Math.round(numberValue)));
+};
+
+const clampBalance = (input: string): number => {
+  const numberValue = Number(input);
+  if (!Number.isFinite(numberValue) || numberValue <= 0) {
+    return 100;
+  }
+  return Math.max(100, Math.round(numberValue));
+};
+
 export function ConsultationPage({
   traderId,
   language,
@@ -51,8 +67,8 @@ export function ConsultationPage({
   onToggleAutoMode,
 }: Props) {
   const [symbolsInput, setSymbolsInput] = useState('');
-  const [leverage, setLeverage] = useState(5);
-  const [balance, setBalance] = useState(1000);
+  const [leverageInput, setLeverageInput] = useState('5');
+  const [balanceInput, setBalanceInput] = useState('1000');
   const [settingsUpdatedAt, setSettingsUpdatedAt] = useState<string>();
   const [isLoadingSettings, setIsLoadingSettings] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -80,8 +96,8 @@ export function ConsultationPage({
         if (!isMounted) return;
         const nextSymbols = (data.symbols || []).join('\n');
         setSymbolsInput(nextSymbols);
-        setLeverage(data.leverage || 5);
-        setBalance(data.balance || 1000);
+        setLeverageInput(String(data.leverage || 5));
+        setBalanceInput(String(data.balance || 1000));
         setSettingsUpdatedAt(data.updated_at);
       })
       .catch((err) => {
@@ -111,16 +127,18 @@ export function ConsultationPage({
     setIsSaving(true);
     setErrorMessage(null);
     try {
+      const sanitizedLeverage = clampLeverage(leverageInput);
+      const sanitizedBalance = clampBalance(balanceInput);
       const payload = {
         trader_id: traderId,
         symbols: nextSymbols,
-        leverage,
-        balance,
+        leverage: sanitizedLeverage,
+        balance: sanitizedBalance,
       };
       const saved = await api.saveConsultationSettings(payload);
       setSymbolsInput((saved.symbols || []).join('\n'));
-      setLeverage(saved.leverage ?? leverage);
-      setBalance(saved.balance ?? balance);
+      setLeverageInput(String(saved.leverage ?? sanitizedLeverage));
+      setBalanceInput(String(saved.balance ?? sanitizedBalance));
       setSettingsUpdatedAt(saved.updated_at);
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : String(err));
@@ -140,11 +158,13 @@ export function ConsultationPage({
     setErrorMessage(null);
     setShowCot(false);
     try {
+      const sanitizedLeverage = clampLeverage(leverageInput);
+      const sanitizedBalance = clampBalance(balanceInput);
       const payload = {
         trader_id: traderId,
         symbols: nextSymbols,
-        leverage,
-        balance,
+        leverage: sanitizedLeverage,
+        balance: sanitizedBalance,
       };
       const advice = await api.requestConsultation(payload);
       setResult(advice);
@@ -233,16 +253,13 @@ export function ConsultationPage({
               {t('consultLeverage', language)}
             </label>
             <input
-              type="number"
-              min={1}
-              max={125}
-              value={leverage}
-              onChange={(e) => {
-                const next = Number(e.target.value);
-                setLeverage(Math.max(1, Number.isNaN(next) ? 1 : next));
-              }}
+              type="text"
+              inputMode="numeric"
+              value={leverageInput}
+              onChange={(e) => setLeverageInput(e.target.value)}
               className="w-full rounded px-4 py-3 text-sm focus:outline-none"
               style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }}
+              placeholder="5"
             />
           </div>
 
@@ -251,16 +268,13 @@ export function ConsultationPage({
               {t('consultBalance', language)}
             </label>
             <input
-              type="number"
-              min={100}
-              step={100}
-              value={balance}
-              onChange={(e) => {
-                const next = Number(e.target.value);
-                setBalance(Math.max(100, Number.isNaN(next) ? 100 : next));
-              }}
+              type="text"
+              inputMode="decimal"
+              value={balanceInput}
+              onChange={(e) => setBalanceInput(e.target.value)}
               className="w-full rounded px-4 py-3 text-sm focus:outline-none"
               style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }}
+              placeholder="1000"
             />
           </div>
 
