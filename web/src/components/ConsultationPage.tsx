@@ -80,6 +80,7 @@ export function ConsultationPage({
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [noteInput, setNoteInput] = useState('');
+  const [expandedHistory, setExpandedHistory] = useState<Record<number, boolean>>({});
 
   useEffect(() => {
     if (!traderId) {
@@ -157,6 +158,15 @@ export function ConsultationPage({
   }, [traderId]);
 
   const parsedSymbols = useMemo(() => parseSymbolsInput(symbolsInput), [symbolsInput]);
+  const orderedHistory = useMemo(() => {
+    if (historyRecords.length === 0) return [];
+    return [...historyRecords].reverse();
+  }, [historyRecords]);
+
+  const truncateText = (text: string, limit = 140) => {
+    if (text.length <= limit) return text;
+    return `${text.slice(0, limit)}…`;
+  };
 
   const handleSave = async () => {
     if (!traderId) return;
@@ -236,6 +246,13 @@ export function ConsultationPage({
   const handleLoadHistory = (entry: ConsultationHistoryItem) => {
     setResult(entry);
     setShowCot(false);
+  };
+
+  const toggleHistoryExpand = (id: number) => {
+    setExpandedHistory((prev) => ({
+      ...prev,
+      [id]: !prev[id],
+    }));
   };
 
   if (!traderId) {
@@ -370,23 +387,6 @@ export function ConsultationPage({
         </div>
       </div>
 
-      <div className="binance-card p-5 space-y-3">
-        <label className="font-semibold text-sm" style={{ color: '#EAECEF' }}>
-          {t('consultNoteLabel', language)}
-        </label>
-        <textarea
-          value={noteInput}
-          onChange={(e) => setNoteInput(e.target.value)}
-          rows={4}
-          placeholder={t('consultNotePlaceholder', language)}
-          className="w-full rounded px-4 py-3 text-sm resize-none focus:outline-none"
-          style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }}
-        />
-        <p className="text-xs" style={{ color: '#848E9C' }}>
-          {t('consultNoteHint', language)}
-        </p>
-      </div>
-
       {errorMessage && (
         <div className="binance-card p-4 text-sm" style={{ color: '#F6465D', border: '1px solid rgba(246, 70, 93, 0.4)' }}>
           {errorMessage}
@@ -516,9 +516,9 @@ export function ConsultationPage({
               {t('consultHistorySubtitle', language)}
             </p>
           </div>
-          {historyRecords.length > 0 && (
+          {orderedHistory.length > 0 && (
             <span className="text-xs" style={{ color: '#848E9C' }}>
-              {language === 'zh' ? `${historyRecords.length} 条` : `${historyRecords.length} entries`}
+              {language === 'zh' ? `${orderedHistory.length} 条` : `${orderedHistory.length} entries`}
             </span>
           )}
         </div>
@@ -531,24 +531,39 @@ export function ConsultationPage({
           <p className="text-sm" style={{ color: '#5E6673' }}>
             {language === 'zh' ? '加载中…' : 'Loading history...'}
           </p>
-        ) : historyRecords.length === 0 ? (
+        ) : orderedHistory.length === 0 ? (
           <p className="text-sm" style={{ color: '#5E6673' }}>
             {t('consultHistoryEmpty', language)}
           </p>
         ) : (
           <div className="space-y-3">
-            {historyRecords.map((item) => (
-              <div key={item.record_id} className="space-y-2">
-                {item.note && (
-                  <div className="flex justify-end">
-                    <div className="max-w-3xl px-4 py-2 rounded-lg text-sm" style={{ background: 'rgba(240,185,11,0.08)', border: '1px solid rgba(240,185,11,0.3)', color: '#F0B90B' }}>
-                      <div className="text-[11px] mb-1" style={{ color: '#C3C8D4' }}>
-                        {new Date(item.created_at).toLocaleString()}
+            {orderedHistory.map((item) => {
+              const isExpanded = !!expandedHistory[item.record_id];
+              const trimmedNote = item.note?.trim() ?? '';
+              const needsToggle = trimmedNote.length > 140;
+              const noteDisplay = isExpanded || !needsToggle ? trimmedNote : truncateText(trimmedNote, 140);
+              return (
+                <div key={item.record_id} className="space-y-2">
+                  {trimmedNote && (
+                    <div className="flex justify-end">
+                      <div className="max-w-3xl px-4 py-2 rounded-lg text-sm space-y-1" style={{ background: 'rgba(240,185,11,0.08)', border: '1px solid rgba(240,185,11,0.3)', color: '#F0B90B' }}>
+                        <div className="text-[11px]" style={{ color: '#C3C8D4' }}>
+                          {new Date(item.created_at).toLocaleString()}
+                        </div>
+                        <p>{noteDisplay}</p>
+                        {needsToggle && (
+                          <button
+                            type="button"
+                            onClick={() => toggleHistoryExpand(item.record_id)}
+                            className="text-[11px] underline hover:opacity-80"
+                            style={{ color: '#C3C8D4' }}
+                          >
+                            {isExpanded ? t('consultHistoryCollapse', language) : t('consultHistoryExpand', language)}
+                          </button>
+                        )}
                       </div>
-                      {item.note}
                     </div>
-                  </div>
-                )}
+                  )}
                 <div className="rounded-lg p-4 space-y-2" style={{ background: '#0B0E11', border: '1px solid #2B3139' }}>
                   <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                     <div>
@@ -574,10 +589,38 @@ export function ConsultationPage({
                     ID #{item.record_id}
                   </div>
                 </div>
-              </div>
-            ))}
+                </div>
+              );
+            })}
           </div>
         )}
+        <div className="space-y-2 pt-2">
+          <textarea
+            value={noteInput}
+            onChange={(e) => setNoteInput(e.target.value)}
+            rows={4}
+            placeholder={t('consultNotePlaceholder', language)}
+            className="w-full rounded px-4 py-3 text-sm resize-none focus:outline-none"
+            style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }}
+          />
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+            <p className="text-xs" style={{ color: '#848E9C' }}>
+              {t('consultNoteHint', language)}
+            </p>
+            <button
+              onClick={handleRequest}
+              disabled={isRequesting || noteInput.trim().length === 0}
+              className="px-4 py-2 rounded border text-xs font-semibold transition-all"
+              style={{
+                borderColor: '#F0B90B',
+                color: '#F0B90B',
+                opacity: isRequesting || noteInput.trim().length === 0 ? 0.6 : 1,
+              }}
+            >
+              {isRequesting ? '⏳' : t('consultConversationSend', language)}
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );
