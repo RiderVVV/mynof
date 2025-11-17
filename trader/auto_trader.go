@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/adshao/go-binance/v2/futures"
@@ -245,6 +246,32 @@ type AutoTrader struct {
 	profitGuardAnchorPct    float64
 	profitGuardRetainRatio  float64
 	profitGuardMinRetainUSD float64
+	autoModeMu              sync.RWMutex
+	autoModeEnabled         bool
+}
+
+// IsAutoModeEnabled returns whether automated trading cycles are allowed.
+func (at *AutoTrader) IsAutoModeEnabled() bool {
+	at.autoModeMu.RLock()
+	enabled := at.autoModeEnabled
+	at.autoModeMu.RUnlock()
+	return enabled
+}
+
+// SetAutoMode enables or disables the automated trading loop.
+func (at *AutoTrader) SetAutoMode(enabled bool) {
+	at.autoModeMu.Lock()
+	changed := at.autoModeEnabled != enabled
+	at.autoModeEnabled = enabled
+	at.autoModeMu.Unlock()
+	if !changed {
+		return
+	}
+	if enabled {
+		log.Printf("🟢 [%s] 自动交易模式已开启", at.name)
+	} else {
+		log.Printf("🟡 [%s] 自动交易模式已关闭（进入咨询模式）", at.name)
+	}
 }
 
 type profitProtectionThresholds struct {
@@ -480,6 +507,7 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 		profitGuardAnchorPct:    profitAnchorPct,
 		profitGuardRetainRatio:  profitRetainRatio,
 		profitGuardMinRetainUSD: profitMinRetainUSD,
+		autoModeEnabled:         false,
 	}
 	if result.config.SimpleTrailingFeePct <= 0 {
 		result.config.SimpleTrailingFeePct = simpleTrailingDefaultFeePct
@@ -638,6 +666,11 @@ func (at *AutoTrader) runGuardCycle() error {
 
 // runCycle 运行一个交易周期（使用AI全权决策）
 func (at *AutoTrader) runCycle() error {
+	if !at.IsAutoModeEnabled() {
+		log.Println("⚪ 自动模式关闭，跳过本次自动交易循环（咨询模式）")
+		return nil
+	}
+
 	at.callCount++
 
 	log.Print("\n" + strings.Repeat("=", 70))
@@ -3958,6 +3991,7 @@ func (at *AutoTrader) GetStatus() map[string]interface{} {
 		"entry_price_protect":   at.entryPriceProtect,
 		"entry_timeout_minutes": int(at.entryTimeout.Minutes()),
 		"pending_entries":       at.snapshotPendingEntries(),
+		"auto_mode_enabled":     at.IsAutoModeEnabled(),
 	}
 }
 

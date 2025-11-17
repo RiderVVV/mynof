@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
 import useSWR from 'swr';
 import { api } from './lib/api';
-import { EquityChart } from './components/EquityChart';
 import { CompetitionPage } from './components/CompetitionPage';
+import { ConsultationPage } from './components/ConsultationPage';
+import { EquityChart } from './components/EquityChart';
 import AILearning from './components/AILearning';
 import { LanguageProvider, useLanguage } from './contexts/LanguageContext';
 import { t, type Language } from './i18n/translations';
@@ -13,9 +14,10 @@ import type {
   DecisionRecord,
   Statistics,
   TraderInfo,
+  AutoModeInfo,
 } from './types';
 
-type Page = 'competition' | 'trader';
+type Page = 'competition' | 'trader' | 'consult';
 
 function App() {
   const { language, setLanguage } = useLanguage();
@@ -23,7 +25,9 @@ function App() {
   // 从URL hash读取初始页面状态（支持刷新保持页面）
   const getInitialPage = (): Page => {
     const hash = window.location.hash.slice(1); // 去掉 #
-    return hash === 'trader' || hash === 'details' ? 'trader' : 'competition';
+    if (hash === 'trader' || hash === 'details') return 'trader';
+    if (hash === 'consult') return 'consult';
+    return 'consult';
   };
 
   const [currentPage, setCurrentPage] = useState<Page>(getInitialPage());
@@ -36,6 +40,8 @@ function App() {
       const hash = window.location.hash.slice(1);
       if (hash === 'trader' || hash === 'details') {
         setCurrentPage('trader');
+      } else if (hash === 'consult') {
+        setCurrentPage('consult');
       } else if (hash === 'competition' || hash === '') {
         setCurrentPage('competition');
       }
@@ -48,7 +54,7 @@ function App() {
   // 切换页面时更新URL hash
   const navigateToPage = (page: Page) => {
     setCurrentPage(page);
-    window.location.hash = page === 'competition' ? '' : 'trader';
+    window.location.hash = page === 'competition' ? '' : page;
   };
 
   // 获取trader列表
@@ -123,6 +129,30 @@ function App() {
       dedupingInterval: 20000,
     }
   );
+
+  const { data: autoModeInfo, mutate: mutateAutoMode } = useSWR<AutoModeInfo>(
+    selectedTraderId ? `auto-mode-${selectedTraderId}` : null,
+    () => (selectedTraderId ? api.getAutoMode(selectedTraderId) : Promise.reject())
+  );
+
+  const [isUpdatingAutoMode, setIsUpdatingAutoMode] = useState(false);
+
+  const handleToggleAutoMode = async () => {
+    if (!selectedTraderId || !autoModeInfo || isUpdatingAutoMode) return;
+    const nextState = !autoModeInfo.auto_mode_enabled;
+    setIsUpdatingAutoMode(true);
+    try {
+      await api.setAutoMode(selectedTraderId, nextState);
+      mutateAutoMode(
+        { trader_id: selectedTraderId, auto_mode_enabled: nextState },
+        false
+      );
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setIsUpdatingAutoMode(false);
+    }
+  };
 
   useEffect(() => {
     if (account) {
@@ -207,30 +237,27 @@ function App() {
 
               {/* Page Toggle */}
               <div className="flex gap-0.5 sm:gap-1 rounded p-0.5 sm:p-1" style={{ background: '#1E2329' }}>
-                <button
-                  onClick={() => navigateToPage('competition')}
-                  className="px-2 sm:px-4 py-1.5 sm:py-2 rounded text-xs sm:text-sm font-semibold transition-all"
-                  style={currentPage === 'competition'
-                    ? { background: '#F0B90B', color: '#000' }
-                    : { background: 'transparent', color: '#848E9C' }
-                  }
-                >
-                  {t('competition', language)}
-                </button>
-                <button
-                  onClick={() => navigateToPage('trader')}
-                  className="px-2 sm:px-4 py-1.5 sm:py-2 rounded text-xs sm:text-sm font-semibold transition-all"
-                  style={currentPage === 'trader'
-                    ? { background: '#F0B90B', color: '#000' }
-                    : { background: 'transparent', color: '#848E9C' }
-                  }
-                >
-                  {t('details', language)}
-                </button>
+                {(['competition', 'trader', 'consult'] as Page[]).map((page) => (
+                  <button
+                    key={page}
+                    onClick={() => navigateToPage(page)}
+                    className="px-2 sm:px-4 py-1.5 sm:py-2 rounded text-xs sm:text-sm font-semibold transition-all"
+                    style={currentPage === page
+                      ? { background: '#F0B90B', color: '#000' }
+                      : { background: 'transparent', color: '#848E9C' }
+                    }
+                  >
+                    {page === 'competition'
+                      ? t('competition', language)
+                      : page === 'trader'
+                        ? t('details', language)
+                        : t('consultation', language)}
+                  </button>
+                ))}
               </div>
 
               {/* Trader Selector (only show on trader page) */}
-              {currentPage === 'trader' && traders && traders.length > 0 && (
+              {currentPage !== 'competition' && traders && traders.length > 0 && (
                 <select
                   value={selectedTraderId}
                   onChange={(e) => setSelectedTraderId(e.target.value)}
@@ -263,6 +290,22 @@ function App() {
                   </span>
                 </div>
               )}
+              {currentPage !== 'competition' && selectedTraderId && (
+                <button
+                  onClick={handleToggleAutoMode}
+                  disabled={!autoModeInfo || isUpdatingAutoMode}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded text-xs font-semibold transition-all border"
+                  style={
+                    autoModeInfo?.auto_mode_enabled
+                      ? { borderColor: '#0ECB81', color: '#0ECB81' }
+                      : { borderColor: '#F0B90B', color: '#F0B90B' }
+                  }
+                >
+                  {autoModeInfo?.auto_mode_enabled
+                    ? t('autoModeOn', language)
+                    : t('autoModeOff', language)}
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -272,7 +315,7 @@ function App() {
       <main className="max-w-[1920px] mx-auto px-6 py-6">
         {currentPage === 'competition' ? (
           <CompetitionPage />
-        ) : (
+        ) : currentPage === 'trader' ? (
           <TraderDetailsPage
             selectedTrader={selectedTrader}
             status={status}
@@ -282,6 +325,15 @@ function App() {
             stats={stats}
             lastUpdate={lastUpdate}
             language={language}
+          />
+        ) : (
+          <ConsultationPage
+            traderId={selectedTraderId}
+            language={language}
+            autoModeEnabled={autoModeInfo?.auto_mode_enabled}
+            onToggleAutoMode={handleToggleAutoMode}
+            autoModeLoading={!autoModeInfo}
+            autoModeUpdating={isUpdatingAutoMode}
           />
         )}
       </main>

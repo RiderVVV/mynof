@@ -220,3 +220,26 @@ func (tm *TraderManager) GetComparisonData() (map[string]interface{}, error) {
 
 	return comparison, nil
 }
+
+// SetAutoMode 设置指定trader的自动交易模式
+func (tm *TraderManager) SetAutoMode(id string, enabled bool) error {
+	tm.mu.RLock()
+	traderInstance, exists := tm.traders[id]
+	tm.mu.RUnlock()
+	if !exists {
+		return fmt.Errorf("trader ID '%s' 不存在", id)
+	}
+	traderInstance.SetAutoMode(enabled)
+	return nil
+}
+
+// GetAutoMode 查询指定trader是否开启自动模式
+func (tm *TraderManager) GetAutoMode(id string) (bool, error) {
+	tm.mu.RLock()
+	traderInstance, exists := tm.traders[id]
+	tm.mu.RUnlock()
+	if !exists {
+		return false, fmt.Errorf("trader ID '%s' 不存在", id)
+	}
+	return traderInstance.IsAutoModeEnabled(), nil
+}

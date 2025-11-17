@@ -5,6 +5,7 @@ import (
 	"log"
 	"nofx/api"
 	"nofx/config"
+	"nofx/consult"
 	"nofx/manager"
 	"nofx/pool"
 	"os"
@@ -112,8 +113,14 @@ func main() {
 	fmt.Println(strings.Repeat("=", 60))
 	fmt.Println()
 
+	consultStore, err := consult.NewStore("")
+	if err != nil {
+		log.Fatalf("❌ 初始化咨询模式存储失败: %v", err)
+	}
+	defer consultStore.Close()
+
 	// 创建并启动API服务器
-	apiServer := api.NewServer(traderManager, cfg.APIServerPort)
+	apiServer := api.NewServer(traderManager, cfg.APIServerPort, consultStore)
 	go func() {
 		if err := apiServer.Start(); err != nil {
 			log.Printf("❌ API服务器错误: %v", err)

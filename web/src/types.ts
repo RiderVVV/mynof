@@ -135,3 +135,60 @@ export interface CompetitionData {
   traders: CompetitionTraderData[];
   count: number;
 }
+
+export interface ConsultationSettings {
+  trader_id: string;
+  symbols: string[];
+  leverage: number;
+  balance: number;
+  updated_at?: string;
+}
+
+export interface ConsultationPayload {
+  trader_id: string;
+  symbols: string[];
+  leverage: number;
+  balance: number;
+}
+
+export interface ConsultationTpTarget {
+  price?: number;
+  size_pct?: number;
+  size_usd?: number;
+  kind?: string;
+}
+
+export interface ConsultationDecision {
+  symbol: string;
+  action: string;
+  leverage?: number;
+  position_size_usd?: number;
+  stop_loss?: number;
+  take_profit?: number;
+  tp_targets?: ConsultationTpTarget[];
+  strategy_hint?: string;
+  confidence?: number;
+  risk_usd?: number;
+  reasoning: string;
+  entry_type?: string;
+  entry_price?: number;
+  entry_limit_price?: number;
+  entry_activation_price?: number;
+  entry_timeout_minutes?: number;
+}
+
+export interface ConsultationResult {
+  trader_id: string;
+  timestamp: string;
+  symbols: string[];
+  leverage: number;
+  balance: number;
+  decisions: ConsultationDecision[];
+  cot_trace: string;
+  prompt?: string;
+}
+
+export interface AutoModeInfo {
+  trader_id: string;
+  auto_mode_enabled: boolean;
+}

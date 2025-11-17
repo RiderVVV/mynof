@@ -1,10 +1,15 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"nofx/consult"
 	"nofx/manager"
+	"nofx/trader"
+	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -14,10 +19,24 @@ type Server struct {
 	router        *gin.Engine
 	traderManager *manager.TraderManager
 	port          int
+	consultStore  *consult.Store
+}
+
+type consultationPayload struct {
+	TraderID    string   `json:"trader_id"`
+	Symbols     []string `json:"symbols"`
+	SymbolsText string   `json:"symbols_text"`
+	Leverage    int      `json:"leverage"`
+	Balance     float64  `json:"balance"`
+}
+
+type autoModePayload struct {
+	TraderID string `json:"trader_id"`
+	Enabled  bool   `json:"enabled"`
 }
 
 // NewServer 创建API服务器
-func NewServer(traderManager *manager.TraderManager, port int) *Server {
+func NewServer(traderManager *manager.TraderManager, port int, consultStore *consult.Store) *Server {
 	// 设置为Release模式（减少日志输出）
 	gin.SetMode(gin.ReleaseMode)
 
@@ -30,6 +49,7 @@ func NewServer(traderManager *manager.TraderManager, port int) *Server {
 		router:        router,
 		traderManager: traderManager,
 		port:          port,
+		consultStore:  consultStore,
 	}
 
 	// 设置路由
@@ -77,6 +97,18 @@ func (s *Server) setupRoutes() {
 		api.GET("/statistics", s.handleStatistics)
 		api.GET("/equity-history", s.handleEquityHistory)
 		api.GET("/performance", s.handlePerformance)
+
+		// 咨询模式
+		consultation := api.Group("/consultation")
+		{
+			consultation.GET("/settings", s.handleGetConsultationSettings)
+			consultation.PUT("/settings", s.handleSaveConsultationSettings)
+			consultation.POST("/request", s.handleConsultationRequest)
+		}
+
+		// 自动模式控制
+		api.GET("/auto-mode", s.handleGetAutoMode)
+		api.POST("/auto-mode", s.handleSetAutoMode)
 	}
 }
 
@@ -399,6 +431,262 @@ func (s *Server) handlePerformance(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, performance)
+}
+
+// handleGetConsultationSettings 返回咨询模式配置
+func (s *Server) handleGetConsultationSettings(c *gin.Context) {
+	if s.consultStore == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "咨询模式未启用"})
+		return
+	}
+
+	_, traderID, err := s.getTraderFromQuery(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	traderObj, err := s.traderManager.GetTrader(traderID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+
+	defaults := traderObj.GetConsultationDefaults()
+	response := gin.H{
+		"trader_id": traderID,
+		"symbols":   defaults.Symbols,
+		"leverage":  defaults.Leverage,
+		"balance":   defaults.Balance,
+	}
+
+	prefs, err := s.consultStore.GetPreferences(traderID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": fmt.Sprintf("加载咨询配置失败: %v", err),
+		})
+		return
+	}
+	if prefs != nil {
+		if len(prefs.Symbols) > 0 {
+			response["symbols"] = prefs.Symbols
+		}
+		if prefs.Leverage > 0 {
+			response["leverage"] = prefs.Leverage
+		}
+		if prefs.Balance > 0 {
+			response["balance"] = prefs.Balance
+		}
+		response["updated_at"] = prefs.UpdatedAt.Format(time.RFC3339)
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+// handleSaveConsultationSettings 保存咨询模式配置
+func (s *Server) handleSaveConsultationSettings(c *gin.Context) {
+	if s.consultStore == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "咨询模式未启用"})
+		return
+	}
+
+	var payload consultationPayload
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("请求体解析失败: %v", err)})
+		return
+	}
+
+	traderID := payload.TraderID
+	if traderID == "" {
+		traderID = c.Query("trader_id")
+	}
+	if traderID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "trader_id 必填"})
+		return
+	}
+
+	if _, err := s.traderManager.GetTrader(traderID); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+
+	symbols := mergeConsultSymbols(payload.Symbols, payload.SymbolsText)
+	if len(symbols) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请至少配置一个交易对"})
+		return
+	}
+
+	record, err := s.consultStore.SavePreferences(consult.Preferences{
+		TraderID: traderID,
+		Symbols:  symbols,
+		Leverage: payload.Leverage,
+		Balance:  payload.Balance,
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": fmt.Sprintf("保存咨询配置失败: %v", err),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"trader_id":  traderID,
+		"symbols":    record.Symbols,
+		"leverage":   record.Leverage,
+		"balance":    record.Balance,
+		"updated_at": record.UpdatedAt.Format(time.RFC3339),
+	})
+}
+
+// handleConsultationRequest 执行一次咨询模式AI请求
+func (s *Server) handleConsultationRequest(c *gin.Context) {
+	if s.consultStore == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "咨询模式未启用"})
+		return
+	}
+
+	var payload consultationPayload
+	if c.Request.ContentLength > 0 {
+		if err := c.ShouldBindJSON(&payload); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("请求体解析失败: %v", err)})
+			return
+		}
+	}
+
+	traderID := payload.TraderID
+	if traderID == "" {
+		traderID = c.Query("trader_id")
+	}
+	if traderID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "trader_id 必填"})
+		return
+	}
+
+	traderObj, err := s.traderManager.GetTrader(traderID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+
+	symbols := mergeConsultSymbols(payload.Symbols, payload.SymbolsText)
+	leverage := payload.Leverage
+	balance := payload.Balance
+
+	if prefs, err := s.consultStore.GetPreferences(traderID); err == nil && prefs != nil {
+		if len(symbols) == 0 {
+			symbols = append([]string(nil), prefs.Symbols...)
+		}
+		if leverage <= 0 && prefs.Leverage > 0 {
+			leverage = prefs.Leverage
+		}
+		if balance <= 0 && prefs.Balance > 0 {
+			balance = prefs.Balance
+		}
+	} else if err != nil {
+		log.Printf("⚠️  加载咨询配置失败，将使用默认值: %v", err)
+	}
+
+	defaults := traderObj.GetConsultationDefaults()
+	if len(symbols) == 0 {
+		symbols = append([]string(nil), defaults.Symbols...)
+	}
+	if leverage <= 0 {
+		leverage = defaults.Leverage
+	}
+	if balance <= 0 {
+		balance = defaults.Balance
+	}
+
+	request := trader.ConsultationRequest{
+		Symbols:  symbols,
+		Leverage: leverage,
+		Balance:  balance,
+	}
+
+	result, err := traderObj.GenerateConsultation(request)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, trader.ErrNoConsultSymbols) {
+			status = http.StatusBadRequest
+		}
+		c.JSON(status, gin.H{
+			"error": fmt.Sprintf("获取AI建议失败: %v", err),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"trader_id": traderID,
+		"timestamp": result.Timestamp.Format(time.RFC3339),
+		"symbols":   result.Symbols,
+		"leverage":  result.Leverage,
+		"balance":   result.Balance,
+		"decisions": result.Decisions,
+		"cot_trace": result.CoTTrace,
+		"prompt":    result.Prompt,
+	})
+}
+
+func mergeConsultSymbols(list []string, raw string) []string {
+	combined := make([]string, 0, len(list)+8)
+	combined = append(combined, list...)
+	if strings.TrimSpace(raw) != "" {
+		parts := strings.FieldsFunc(raw, func(r rune) bool {
+			switch r {
+			case ',', ';', '\n', '\r', '\t', ' ':
+				return true
+			default:
+				return false
+			}
+		})
+		combined = append(combined, parts...)
+	}
+	return consult.NormalizeSymbols(combined)
+}
+
+// handleGetAutoMode 查询自动交易状态
+func (s *Server) handleGetAutoMode(c *gin.Context) {
+	_, traderID, err := s.getTraderFromQuery(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	enabled, err := s.traderManager.GetAutoMode(traderID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"trader_id":         traderID,
+		"auto_mode_enabled": enabled,
+	})
+}
+
+// handleSetAutoMode 切换自动交易状态
+func (s *Server) handleSetAutoMode(c *gin.Context) {
+	var payload autoModePayload
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("请求体解析失败: %v", err)})
+		return
+	}
+
+	traderID := payload.TraderID
+	if traderID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "trader_id 必填"})
+		return
+	}
+
+	if err := s.traderManager.SetAutoMode(traderID, payload.Enabled); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"trader_id":         traderID,
+		"auto_mode_enabled": payload.Enabled,
+	})
 }
 
 // Start 启动服务器

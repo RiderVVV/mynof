@@ -6,6 +6,10 @@ import type {
   Statistics,
   TraderInfo,
   CompetitionData,
+  ConsultationSettings,
+  ConsultationPayload,
+  ConsultationResult,
+  AutoModeInfo,
 } from '../types';
 
 const API_BASE = '/api';
@@ -108,6 +112,54 @@ export const api = {
       : `${API_BASE}/performance`;
     const res = await fetch(url);
     if (!res.ok) throw new Error('获取AI学习数据失败');
+    return res.json();
+  },
+
+  async getConsultationSettings(traderId: string): Promise<ConsultationSettings> {
+    const res = await fetch(`${API_BASE}/consultation/settings?trader_id=${traderId}`);
+    if (!res.ok) throw new Error('获取咨询模式设置失败');
+    return res.json();
+  },
+
+  async saveConsultationSettings(payload: ConsultationPayload): Promise<ConsultationSettings> {
+    const res = await fetch(`${API_BASE}/consultation/settings`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) throw new Error('保存咨询模式设置失败');
+    return res.json();
+  },
+
+  async requestConsultation(payload: ConsultationPayload): Promise<ConsultationResult> {
+    const res = await fetch(`${API_BASE}/consultation/request`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) throw new Error('获取AI咨询建议失败');
+    return res.json();
+  },
+
+  async getAutoMode(traderId: string): Promise<AutoModeInfo> {
+    const res = await fetch(`${API_BASE}/auto-mode?trader_id=${traderId}`);
+    if (!res.ok) throw new Error('获取自动模式状态失败');
+    return res.json();
+  },
+
+  async setAutoMode(traderId: string, enabled: boolean): Promise<AutoModeInfo> {
+    const res = await fetch(`${API_BASE}/auto-mode`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ trader_id: traderId, enabled }),
+    });
+    if (!res.ok) throw new Error('更新自动模式状态失败');
     return res.json();
   },
 };
