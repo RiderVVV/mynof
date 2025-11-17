@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../lib/api';
-import type { ConsultationResult } from '../types';
+import type { ConsultationHistoryItem, ConsultationResult } from '../types';
 import { t, type Language } from '../i18n/translations';
 
 type Props = {
@@ -76,6 +76,9 @@ export function ConsultationPage({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [result, setResult] = useState<ConsultationResult | null>(null);
   const [showCot, setShowCot] = useState(false);
+  const [historyRecords, setHistoryRecords] = useState<ConsultationHistoryItem[]>([]);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!traderId) {
@@ -99,6 +102,9 @@ export function ConsultationPage({
         setLeverageInput(String(data.leverage || 5));
         setBalanceInput(String(data.balance || 1000));
         setSettingsUpdatedAt(data.updated_at);
+        if (data.latest_result) {
+          setResult(data.latest_result);
+        }
       })
       .catch((err) => {
         if (!isMounted) return;
@@ -107,6 +113,38 @@ export function ConsultationPage({
       .finally(() => {
         if (isMounted) {
           setIsLoadingSettings(false);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [traderId]);
+
+  useEffect(() => {
+    if (!traderId) {
+      setHistoryRecords([]);
+      setHistoryError(null);
+      setIsLoadingHistory(false);
+      return;
+    }
+    let isMounted = true;
+    setIsLoadingHistory(true);
+    setHistoryError(null);
+    api
+      .getConsultationHistory(traderId, 20)
+      .then((data) => {
+        if (!isMounted) return;
+        setHistoryRecords(data.records || []);
+      })
+      .catch((err) => {
+        if (!isMounted) return;
+        setHistoryRecords([]);
+        setHistoryError(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => {
+        if (isMounted) {
+          setIsLoadingHistory(false);
         }
       });
 
@@ -168,11 +206,29 @@ export function ConsultationPage({
       };
       const advice = await api.requestConsultation(payload);
       setResult(advice);
+      if (advice.record_id) {
+        const createdAt = advice.created_at ?? advice.timestamp;
+        const nextEntry: ConsultationHistoryItem = {
+          ...advice,
+          record_id: advice.record_id,
+          created_at: createdAt,
+        };
+        setHistoryRecords((prev) => {
+          const withoutDuplicate = prev.filter((item) => item.record_id !== advice.record_id);
+          return [nextEntry, ...withoutDuplicate].slice(0, 20);
+        });
+        setHistoryError(null);
+      }
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : String(err));
     } finally {
       setIsRequesting(false);
     }
+  };
+
+  const handleLoadHistory = (entry: ConsultationHistoryItem) => {
+    setResult(entry);
+    setShowCot(false);
   };
 
   if (!traderId) {
@@ -417,6 +473,65 @@ export function ConsultationPage({
                 {result.cot_trace}
               </pre>
             )}
+          </div>
+        )}
+      </div>
+
+      <div className="binance-card p-6 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+          <h3 className="text-lg font-bold" style={{ color: '#EAECEF' }}>
+            {t('consultHistoryTitle', language)}
+          </h3>
+          {historyRecords.length > 0 && (
+            <span className="text-xs" style={{ color: '#848E9C' }}>
+              {language === 'zh' ? `${historyRecords.length} 条记录` : `${historyRecords.length} entries`}
+            </span>
+          )}
+        </div>
+        {historyError && (
+          <div className="text-xs" style={{ color: '#F6465D' }}>
+            {historyError}
+          </div>
+        )}
+        {isLoadingHistory ? (
+          <p className="text-sm" style={{ color: '#5E6673' }}>
+            {language === 'zh' ? '加载中…' : 'Loading history...'}
+          </p>
+        ) : historyRecords.length === 0 ? (
+          <p className="text-sm" style={{ color: '#5E6673' }}>
+            {t('consultHistoryEmpty', language)}
+          </p>
+        ) : (
+          <div className="space-y-3">
+            {historyRecords.map((item) => (
+              <div key={item.record_id} className="rounded-lg p-4 space-y-2" style={{ background: '#0B0E11', border: '1px solid #2B3139' }}>
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold" style={{ color: '#EAECEF' }}>
+                      {new Date(item.timestamp).toLocaleString()}
+                    </p>
+                    <p className="text-xs" style={{ color: '#848E9C' }}>
+                      {item.symbols.join(', ')}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2 text-xs" style={{ color: '#848E9C' }}>
+                    <span>{t('consultDecisionsCount', language, { count: item.decisions?.length ?? 0 })}</span>
+                    <button
+                      onClick={() => handleLoadHistory(item)}
+                      className="px-3 py-1 rounded border text-xs font-semibold hover:opacity-80 transition-all"
+                      style={{ borderColor: '#F0B90B', color: '#F0B90B' }}
+                    >
+                      {t('consultHistoryLoad', language)}
+                    </button>
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs" style={{ color: '#C3C8D4' }}>
+                  <div>⚖ {item.leverage}x</div>
+                  <div>💰 {formatNumber(item.balance, 0)} USDT</div>
+                  <div>🧾 #{item.record_id}</div>
+                </div>
+              </div>
+            ))}
           </div>
         )}
       </div>

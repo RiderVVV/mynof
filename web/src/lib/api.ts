@@ -9,6 +9,7 @@ import type {
   ConsultationSettings,
   ConsultationPayload,
   ConsultationResult,
+  ConsultationHistoryResponse,
   AutoModeInfo,
 } from '../types';
 
@@ -142,6 +143,12 @@ export const api = {
       body: JSON.stringify(payload),
     });
     if (!res.ok) throw new Error('获取AI咨询建议失败');
+    return res.json();
+  },
+
+  async getConsultationHistory(traderId: string, limit = 20): Promise<ConsultationHistoryResponse> {
+    const res = await fetch(`${API_BASE}/consultation/history?trader_id=${traderId}&limit=${limit}`);
+    if (!res.ok) throw new Error('获取咨询模式历史失败');
     return res.json();
   },
 

@@ -142,6 +142,7 @@ export interface ConsultationSettings {
   leverage: number;
   balance: number;
   updated_at?: string;
+  latest_result?: ConsultationHistoryItem;
 }
 
 export interface ConsultationPayload {
@@ -186,6 +187,18 @@ export interface ConsultationResult {
   decisions: ConsultationDecision[];
   cot_trace: string;
   prompt?: string;
+  record_id?: number;
+  created_at?: string;
+}
+
+export interface ConsultationHistoryItem extends ConsultationResult {
+  record_id: number;
+  created_at: string;
+}
+
+export interface ConsultationHistoryResponse {
+  trader_id: string;
+  records: ConsultationHistoryItem[];
 }
 
 export interface AutoModeInfo {

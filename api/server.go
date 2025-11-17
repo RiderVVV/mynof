@@ -8,6 +8,7 @@ import (
 	"nofx/consult"
 	"nofx/manager"
 	"nofx/trader"
+	"strconv"
 	"strings"
 	"time"
 
@@ -104,6 +105,7 @@ func (s *Server) setupRoutes() {
 			consultation.GET("/settings", s.handleGetConsultationSettings)
 			consultation.PUT("/settings", s.handleSaveConsultationSettings)
 			consultation.POST("/request", s.handleConsultationRequest)
+			consultation.GET("/history", s.handleConsultationHistory)
 		}
 
 		// 自动模式控制
@@ -480,6 +482,17 @@ func (s *Server) handleGetConsultationSettings(c *gin.Context) {
 		response["updated_at"] = prefs.UpdatedAt.Format(time.RFC3339)
 	}
 
+	if record, err := s.consultStore.GetLatestRecord(traderID); err == nil {
+		if record != nil && record.Result != nil {
+			latest := buildConsultationResultPayload(record.TraderID, record.Result)
+			latest["record_id"] = record.ID
+			latest["created_at"] = record.CreatedAt.Format(time.RFC3339)
+			response["latest_result"] = latest
+		}
+	} else {
+		log.Printf("⚠️  加载咨询历史失败: %v", err)
+	}
+
 	c.JSON(http.StatusOK, response)
 }
 
@@ -615,16 +628,94 @@ func (s *Server) handleConsultationRequest(c *gin.Context) {
 		return
 	}
 
+	record, err := s.consultStore.AppendRecord(traderID, result)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": fmt.Sprintf("保存咨询记录失败: %v", err),
+		})
+		return
+	}
+
+	response := buildConsultationResultPayload(traderID, result)
+	if record != nil {
+		response["record_id"] = record.ID
+		response["created_at"] = record.CreatedAt.Format(time.RFC3339)
+	}
+	c.JSON(http.StatusOK, response)
+}
+
+// handleConsultationHistory 返回咨询模式历史记录
+func (s *Server) handleConsultationHistory(c *gin.Context) {
+	if s.consultStore == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "咨询模式未启用"})
+		return
+	}
+
+	_, traderID, err := s.getTraderFromQuery(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if _, err := s.traderManager.GetTrader(traderID); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+
+	limit := 20
+	if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+
+	records, err := s.consultStore.ListRecords(traderID, limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": fmt.Sprintf("读取咨询历史失败: %v", err),
+		})
+		return
+	}
+
+	history := make([]gin.H, 0, len(records))
+	for _, record := range records {
+		if record == nil || record.Result == nil {
+			continue
+		}
+		entry := buildConsultationResultPayload(record.TraderID, record.Result)
+		entry["record_id"] = record.ID
+		entry["created_at"] = record.CreatedAt.Format(time.RFC3339)
+		history = append(history, entry)
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"trader_id": traderID,
-		"timestamp": result.Timestamp.Format(time.RFC3339),
+		"records":   history,
+	})
+}
+
+func buildConsultationResultPayload(traderID string, result *trader.ConsultationResult) gin.H {
+	if result == nil {
+		return gin.H{
+			"trader_id": traderID,
+		}
+	}
+
+	timestamp := result.Timestamp
+	if timestamp.IsZero() {
+		timestamp = time.Now()
+	}
+
+	return gin.H{
+		"trader_id": traderID,
+		"timestamp": timestamp.Format(time.RFC3339),
 		"symbols":   result.Symbols,
 		"leverage":  result.Leverage,
 		"balance":   result.Balance,
 		"decisions": result.Decisions,
 		"cot_trace": result.CoTTrace,
 		"prompt":    result.Prompt,
-	})
+	}
 }
 
 func mergeConsultSymbols(list []string, raw string) []string {

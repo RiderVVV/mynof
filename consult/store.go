@@ -9,9 +9,12 @@ import (
 	"time"
 
 	"nofx/market"
+	"nofx/trader"
 
 	_ "modernc.org/sqlite"
 )
+
+const maxConsultationRecords = 100
 
 // Preferences describes persisted consultation settings for a trader.
 type Preferences struct {
@@ -25,6 +28,17 @@ type Preferences struct {
 // Store wraps the SQLite connection for consultation settings.
 type Store struct {
 	db *sql.DB
+}
+
+// Record 表示一次咨询模式请求的持久化结果。
+type Record struct {
+	ID        int64                      `json:"record_id"`
+	TraderID  string                     `json:"trader_id"`
+	Symbols   []string                   `json:"symbols"`
+	Leverage  int                        `json:"leverage"`
+	Balance   float64                    `json:"balance"`
+	Result    *trader.ConsultationResult `json:"result"`
+	CreatedAt time.Time                  `json:"created_at"`
 }
 
 // NewStore opens (and creates if necessary) the SQLite database used to persist consultation settings.
@@ -60,7 +74,7 @@ func (s *Store) Close() error {
 }
 
 func initSchema(db *sql.DB) error {
-	const ddl = `
+	const settingsDDL = `
 	CREATE TABLE IF NOT EXISTS consultation_settings (
 		trader_id TEXT PRIMARY KEY,
 		symbols   TEXT NOT NULL DEFAULT '[]',
@@ -69,8 +83,29 @@ func initSchema(db *sql.DB) error {
 		updated_at DATETIME NOT NULL
 	);`
 
-	if _, err := db.Exec(ddl); err != nil {
+	if _, err := db.Exec(settingsDDL); err != nil {
 		return fmt.Errorf("初始化咨询模式数据表失败: %w", err)
+	}
+
+	const recordsDDL = `
+	CREATE TABLE IF NOT EXISTS consultation_records (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		trader_id TEXT NOT NULL,
+		symbols TEXT NOT NULL DEFAULT '[]',
+		leverage INTEGER NOT NULL DEFAULT 5,
+		balance REAL NOT NULL DEFAULT 0,
+		result_json TEXT NOT NULL,
+		created_at DATETIME NOT NULL
+	);`
+	if _, err := db.Exec(recordsDDL); err != nil {
+		return fmt.Errorf("初始化咨询模式历史表失败: %w", err)
+	}
+
+	const indexDDL = `
+	CREATE INDEX IF NOT EXISTS idx_consult_records_trader_created
+	ON consultation_records(trader_id, created_at DESC);`
+	if _, err := db.Exec(indexDDL); err != nil {
+		return fmt.Errorf("初始化咨询模式历史索引失败: %w", err)
 	}
 	return nil
 }
@@ -148,6 +183,181 @@ func (s *Store) SavePreferences(p Preferences) (*Preferences, error) {
 	p.Leverage = leverage
 	p.UpdatedAt = now
 	return &p, nil
+}
+
+// AppendRecord 保存一次新的咨询结果。
+func (s *Store) AppendRecord(traderID string, result *trader.ConsultationResult) (*Record, error) {
+	if traderID == "" {
+		return nil, fmt.Errorf("trader_id 不能为空")
+	}
+	if result == nil {
+		return nil, fmt.Errorf("result 不能为空")
+	}
+
+	symbolsJSON, err := json.Marshal(cleanSymbols(result.Symbols))
+	if err != nil {
+		return nil, fmt.Errorf("序列化咨询交易对失败: %w", err)
+	}
+
+	resultJSON, err := json.Marshal(result)
+	if err != nil {
+		return nil, fmt.Errorf("序列化咨询结果失败: %w", err)
+	}
+
+	createdAt := result.Timestamp
+	if createdAt.IsZero() {
+		createdAt = time.Now()
+	}
+
+	const stmt = `
+	INSERT INTO consultation_records (trader_id, symbols, leverage, balance, result_json, created_at)
+	VALUES (?, ?, ?, ?, ?, ?)
+	`
+	res, err := s.db.Exec(stmt, traderID, string(symbolsJSON), result.Leverage, result.Balance, string(resultJSON), createdAt)
+	if err != nil {
+		return nil, fmt.Errorf("保存咨询记录失败: %w", err)
+	}
+
+	recordID, _ := res.LastInsertId()
+	record := &Record{
+		ID:        recordID,
+		TraderID:  traderID,
+		Symbols:   cleanSymbols(result.Symbols),
+		Leverage:  result.Leverage,
+		Balance:   result.Balance,
+		Result:    cloneConsultationResult(result),
+		CreatedAt: createdAt,
+	}
+
+	if err := s.pruneRecords(traderID, maxConsultationRecords); err != nil {
+		return nil, err
+	}
+	return record, nil
+}
+
+// GetLatestRecord 返回最新的一条咨询记录。
+func (s *Store) GetLatestRecord(traderID string) (*Record, error) {
+	records, err := s.ListRecords(traderID, 1)
+	if err != nil {
+		return nil, err
+	}
+	if len(records) == 0 {
+		return nil, nil
+	}
+	return records[0], nil
+}
+
+// ListRecords 获取最近limit条咨询记录。
+func (s *Store) ListRecords(traderID string, limit int) ([]*Record, error) {
+	if traderID == "" {
+		return nil, fmt.Errorf("trader_id 不能为空")
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+
+	const queryTemplate = `
+	SELECT id, symbols, leverage, balance, result_json, created_at
+	FROM consultation_records
+	WHERE trader_id = ?
+	ORDER BY created_at DESC, id DESC
+	LIMIT ?
+	`
+
+	rows, err := s.db.Query(queryTemplate, traderID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("读取咨询记录失败: %w", err)
+	}
+	defer rows.Close()
+
+	var records []*Record
+	for rows.Next() {
+		var (
+			id         int64
+			rawSymbols string
+			leverage   int
+			balance    float64
+			resultJSON string
+			createdAt  time.Time
+		)
+
+		if err := rows.Scan(&id, &rawSymbols, &leverage, &balance, &resultJSON, &createdAt); err != nil {
+			return nil, fmt.Errorf("解析咨询记录失败: %w", err)
+		}
+
+		record, err := buildRecord(traderID, id, rawSymbols, leverage, balance, resultJSON, createdAt)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("迭代咨询记录失败: %w", err)
+	}
+	return records, nil
+}
+
+func buildRecord(traderID string, id int64, rawSymbols string, leverage int, balance float64, resultJSON string, createdAt time.Time) (*Record, error) {
+	var symbols []string
+	if err := json.Unmarshal([]byte(rawSymbols), &symbols); err != nil {
+		symbols = nil
+	}
+
+	var result trader.ConsultationResult
+	if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
+		return nil, fmt.Errorf("解析咨询结果失败: %w", err)
+	}
+	if result.Timestamp.IsZero() {
+		result.Timestamp = createdAt
+	}
+
+	return &Record{
+		ID:        id,
+		TraderID:  traderID,
+		Symbols:   cleanSymbols(symbols),
+		Leverage:  leverage,
+		Balance:   balance,
+		Result:    cloneConsultationResult(&result),
+		CreatedAt: createdAt,
+	}, nil
+}
+
+func cloneConsultationResult(res *trader.ConsultationResult) *trader.ConsultationResult {
+	if res == nil {
+		return nil
+	}
+	data, err := json.Marshal(res)
+	if err != nil {
+		return res
+	}
+	var clone trader.ConsultationResult
+	if err := json.Unmarshal(data, &clone); err != nil {
+		return res
+	}
+	return &clone
+}
+
+func (s *Store) pruneRecords(traderID string, maxRecords int) error {
+	if maxRecords <= 0 {
+		return nil
+	}
+
+	const cleanup = `
+	DELETE FROM consultation_records
+	WHERE trader_id = ?
+		AND id NOT IN (
+			SELECT id FROM consultation_records
+			WHERE trader_id = ?
+			ORDER BY created_at DESC, id DESC
+			LIMIT ?
+		)
+	`
+
+	if _, err := s.db.Exec(cleanup, traderID, traderID, maxRecords); err != nil {
+		return fmt.Errorf("清理咨询记录失败: %w", err)
+	}
+	return nil
 }
 
 func cleanSymbols(input []string) []string {
