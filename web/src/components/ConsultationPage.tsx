@@ -405,9 +405,12 @@ export function ConsultationPage({
               </p>
             )}
             {result?.note && (
-              <p className="text-xs mt-1" style={{ color: '#C3C8D4' }}>
-                🗣 {t('consultNoteLabel', language)}: {result.note}
-              </p>
+              <div className="mt-2 text-xs rounded px-3 py-2" style={{ background: 'rgba(240,185,11,0.08)', border: '1px solid rgba(240,185,11,0.25)', color: '#F0B90B' }}>
+                <p className="font-semibold mb-1" style={{ color: '#F0B90B' }}>
+                  {t('consultNoteUsed', language)}
+                </p>
+                <p style={{ color: '#EAECEF' }}>{result.note}</p>
+              </div>
             )}
           </div>
           {result && (

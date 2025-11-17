@@ -1086,6 +1086,12 @@ func buildUserPrompt(ctx *Context) string {
 	sb.WriteString("\n```\n\n")
 	sb.WriteString("请先输出你的推理过程（思维链），随后给出严格符合指定字段的 JSON 决策数组。\n")
 
+	if strings.TrimSpace(ctx.UserNote) != "" {
+		sb.WriteString("\n重点提醒：以下内容为用户最新备注，必须在思维链与决策中体现如何遵循该信息，并明确说明。\n")
+		sb.WriteString(ctx.UserNote)
+		sb.WriteString("\n\n")
+	}
+
 	return sb.String()
 }
 
