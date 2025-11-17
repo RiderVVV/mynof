@@ -79,12 +79,14 @@ export function ConsultationPage({
   const [historyRecords, setHistoryRecords] = useState<ConsultationHistoryItem[]>([]);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [noteInput, setNoteInput] = useState('');
 
   useEffect(() => {
     if (!traderId) {
       setSymbolsInput('');
       setResult(null);
       setSettingsUpdatedAt(undefined);
+      setNoteInput('');
       return;
     }
     let isMounted = true;
@@ -92,6 +94,7 @@ export function ConsultationPage({
     setErrorMessage(null);
     setResult(null);
     setShowCot(false);
+    setNoteInput('');
 
     api
       .getConsultationSettings(traderId)
@@ -198,11 +201,13 @@ export function ConsultationPage({
     try {
       const sanitizedLeverage = clampLeverage(leverageInput);
       const sanitizedBalance = clampBalance(balanceInput);
+      const trimmedNote = noteInput.trim();
       const payload = {
         trader_id: traderId,
         symbols: nextSymbols,
         leverage: sanitizedLeverage,
         balance: sanitizedBalance,
+        note: trimmedNote.length > 0 ? trimmedNote : undefined,
       };
       const advice = await api.requestConsultation(payload);
       setResult(advice);
@@ -212,6 +217,7 @@ export function ConsultationPage({
           ...advice,
           record_id: advice.record_id,
           created_at: createdAt,
+          note: advice.note ?? trimmedNote,
         };
         setHistoryRecords((prev) => {
           const withoutDuplicate = prev.filter((item) => item.record_id !== advice.record_id);
@@ -219,6 +225,7 @@ export function ConsultationPage({
         });
         setHistoryError(null);
       }
+      setNoteInput('');
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : String(err));
     } finally {
@@ -363,6 +370,23 @@ export function ConsultationPage({
         </div>
       </div>
 
+      <div className="binance-card p-5 space-y-3">
+        <label className="font-semibold text-sm" style={{ color: '#EAECEF' }}>
+          {t('consultNoteLabel', language)}
+        </label>
+        <textarea
+          value={noteInput}
+          onChange={(e) => setNoteInput(e.target.value)}
+          rows={4}
+          placeholder={t('consultNotePlaceholder', language)}
+          className="w-full rounded px-4 py-3 text-sm resize-none focus:outline-none"
+          style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }}
+        />
+        <p className="text-xs" style={{ color: '#848E9C' }}>
+          {t('consultNoteHint', language)}
+        </p>
+      </div>
+
       {errorMessage && (
         <div className="binance-card p-4 text-sm" style={{ color: '#F6465D', border: '1px solid rgba(246, 70, 93, 0.4)' }}>
           {errorMessage}
@@ -378,6 +402,11 @@ export function ConsultationPage({
             {result && (
               <p className="text-xs" style={{ color: '#848E9C' }}>
                 {t('consultAdviceTimestamp', language)}: {new Date(result.timestamp).toLocaleString()}
+              </p>
+            )}
+            {result?.note && (
+              <p className="text-xs mt-1" style={{ color: '#C3C8D4' }}>
+                🗣 {t('consultNoteLabel', language)}: {result.note}
               </p>
             )}
           </div>
@@ -479,12 +508,17 @@ export function ConsultationPage({
 
       <div className="binance-card p-6 space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-          <h3 className="text-lg font-bold" style={{ color: '#EAECEF' }}>
-            {t('consultHistoryTitle', language)}
-          </h3>
+          <div>
+            <h3 className="text-lg font-bold" style={{ color: '#EAECEF' }}>
+              {t('consultHistoryTitle', language)}
+            </h3>
+            <p className="text-xs" style={{ color: '#5E6673' }}>
+              {t('consultHistorySubtitle', language)}
+            </p>
+          </div>
           {historyRecords.length > 0 && (
             <span className="text-xs" style={{ color: '#848E9C' }}>
-              {language === 'zh' ? `${historyRecords.length} 条记录` : `${historyRecords.length} entries`}
+              {language === 'zh' ? `${historyRecords.length} 条` : `${historyRecords.length} entries`}
             </span>
           )}
         </div>
@@ -504,18 +538,30 @@ export function ConsultationPage({
         ) : (
           <div className="space-y-3">
             {historyRecords.map((item) => (
-              <div key={item.record_id} className="rounded-lg p-4 space-y-2" style={{ background: '#0B0E11', border: '1px solid #2B3139' }}>
-                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                  <div>
-                    <p className="text-sm font-semibold" style={{ color: '#EAECEF' }}>
-                      {new Date(item.timestamp).toLocaleString()}
-                    </p>
-                    <p className="text-xs" style={{ color: '#848E9C' }}>
-                      {item.symbols.join(', ')}
-                    </p>
+              <div key={item.record_id} className="space-y-2">
+                {item.note && (
+                  <div className="flex justify-end">
+                    <div className="max-w-3xl px-4 py-2 rounded-lg text-sm" style={{ background: 'rgba(240,185,11,0.08)', border: '1px solid rgba(240,185,11,0.3)', color: '#F0B90B' }}>
+                      <div className="text-[11px] mb-1" style={{ color: '#C3C8D4' }}>
+                        {new Date(item.created_at).toLocaleString()}
+                      </div>
+                      {item.note}
+                    </div>
                   </div>
-                  <div className="flex flex-wrap items-center gap-2 text-xs" style={{ color: '#848E9C' }}>
-                    <span>{t('consultDecisionsCount', language, { count: item.decisions?.length ?? 0 })}</span>
+                )}
+                <div className="rounded-lg p-4 space-y-2" style={{ background: '#0B0E11', border: '1px solid #2B3139' }}>
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold" style={{ color: '#EAECEF' }}>
+                        🤖 {new Date(item.timestamp).toLocaleString()}
+                      </p>
+                      <p className="text-xs" style={{ color: '#848E9C' }}>
+                        {item.symbols.join(', ')} · {item.leverage}x · {formatNumber(item.balance, 0)} USDT
+                      </p>
+                      <p className="text-xs" style={{ color: '#848E9C' }}>
+                        {t('consultDecisionsCount', language, { count: item.decisions?.length ?? 0 })}
+                      </p>
+                    </div>
                     <button
                       onClick={() => handleLoadHistory(item)}
                       className="px-3 py-1 rounded border text-xs font-semibold hover:opacity-80 transition-all"
@@ -524,11 +570,9 @@ export function ConsultationPage({
                       {t('consultHistoryLoad', language)}
                     </button>
                   </div>
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs" style={{ color: '#C3C8D4' }}>
-                  <div>⚖ {item.leverage}x</div>
-                  <div>💰 {formatNumber(item.balance, 0)} USDT</div>
-                  <div>🧾 #{item.record_id}</div>
+                  <div className="text-xs" style={{ color: '#C3C8D4' }}>
+                    ID #{item.record_id}
+                  </div>
                 </div>
               </div>
             ))}

@@ -86,27 +86,36 @@ type OITopData struct {
 
 // Context 交易上下文（传递给AI的完整信息）
 type Context struct {
-	CurrentTime      string                   `json:"current_time"`
-	RuntimeMinutes   int                      `json:"runtime_minutes"`
-	CallCount        int                      `json:"call_count"`
-	Account          AccountInfo              `json:"account"`
-	PerformanceState string                   `json:"-"` // derived risk state (drawdown/loss_streak/positive)
-	SharpeCooling    string                   `json:"-"` // derived cooling level (only_high_confidence_trades/halt_xx)
-	Positions        []PositionInfo           `json:"positions"`
-	CandidateCoins   []CandidateCoin          `json:"candidate_coins"`
-	MarketDataMap    map[string]*market.Data  `json:"-"` // 不序列化，但内部使用
-	OITopDataMap     map[string]*OITopData    `json:"-"` // OI Top数据映射
-	Performance      interface{}              `json:"-"` // 历史表现分析（logger.PerformanceAnalysis）
-	BTCETHLeverage   int                      `json:"-"` // BTC/ETH杠杆倍数（从配置读取）
-	AltcoinLeverage  int                      `json:"-"` // 山寨币杠杆倍数（从配置读取）
-	SystemPromptPath string                   `json:"-"` // 自定义系统提示词路径
-	AuxOpinions      []AuxOpinion             `json:"-"` // 辅助模型意见
-	AuxConsensus     *AuxConsensus            `json:"-"` // 辅助模型共识
-	EnsembleMode     string                   `json:"-"`
-	EnsembleSummary  string                   `json:"-"`
-	RecentRiskAlerts []RiskFlag               `json:"-"`
-	RecentGuardrails []MarketGuardrailWarning `json:"-"`
-	PendingEntries   []PendingEntry           `json:"pending_entries,omitempty"`
+	CurrentTime         string                   `json:"current_time"`
+	RuntimeMinutes      int                      `json:"runtime_minutes"`
+	CallCount           int                      `json:"call_count"`
+	Account             AccountInfo              `json:"account"`
+	PerformanceState    string                   `json:"-"` // derived risk state (drawdown/loss_streak/positive)
+	SharpeCooling       string                   `json:"-"` // derived cooling level (only_high_confidence_trades/halt_xx)
+	Positions           []PositionInfo           `json:"positions"`
+	CandidateCoins      []CandidateCoin          `json:"candidate_coins"`
+	MarketDataMap       map[string]*market.Data  `json:"-"` // 不序列化，但内部使用
+	OITopDataMap        map[string]*OITopData    `json:"-"` // OI Top数据映射
+	Performance         interface{}              `json:"-"` // 历史表现分析（logger.PerformanceAnalysis）
+	BTCETHLeverage      int                      `json:"-"` // BTC/ETH杠杆倍数（从配置读取）
+	AltcoinLeverage     int                      `json:"-"` // 山寨币杠杆倍数（从配置读取）
+	SystemPromptPath    string                   `json:"-"` // 自定义系统提示词路径
+	AuxOpinions         []AuxOpinion             `json:"-"` // 辅助模型意见
+	AuxConsensus        *AuxConsensus            `json:"-"` // 辅助模型共识
+	EnsembleMode        string                   `json:"-"`
+	EnsembleSummary     string                   `json:"-"`
+	RecentRiskAlerts    []RiskFlag               `json:"-"`
+	RecentGuardrails    []MarketGuardrailWarning `json:"-"`
+	PendingEntries      []PendingEntry           `json:"pending_entries,omitempty"`
+	UserNote            string                   `json:"-"`
+	ConversationHistory []ConversationTurn       `json:"-"`
+}
+
+// ConversationTurn 描述用户与AI之间的对话历史记录
+type ConversationTurn struct {
+	Role      string `json:"role"`
+	Content   string `json:"content"`
+	Timestamp string `json:"timestamp,omitempty"`
 }
 
 // AuxConsensus 描述辅助模型之间的总体意见
@@ -883,19 +892,27 @@ type promptEnsembleMeta struct {
 }
 
 type promptSnapshot struct {
-	Runtime           promptRuntime            `json:"runtime"`
-	Account           promptAccount            `json:"account"`
-	Risk              promptRisk               `json:"risk_guardrails"`
-	Performance       *promptPerformance       `json:"performance,omitempty"`
-	OpenPositions     []promptPosition         `json:"open_positions"`
-	Market            []promptMarket           `json:"market"`
-	CandidatePriority []string                 `json:"candidate_priority,omitempty"`
-	RecentRiskAlerts  []RiskFlag               `json:"recent_risk_alerts,omitempty"`
-	RecentGuardrails  []MarketGuardrailWarning `json:"recent_guardrails,omitempty"`
-	AuxOpinions       []promptAuxOpinion       `json:"auxiliary_opinions,omitempty"`
-	AuxConsensus      *promptAuxConsensus      `json:"auxiliary_consensus,omitempty"`
-	EnsembleMeta      *promptEnsembleMeta      `json:"ensemble_meta,omitempty"`
-	PendingEntries    []PendingEntry           `json:"pending_entries,omitempty"`
+	Runtime             promptRuntime            `json:"runtime"`
+	Account             promptAccount            `json:"account"`
+	Risk                promptRisk               `json:"risk_guardrails"`
+	Performance         *promptPerformance       `json:"performance,omitempty"`
+	OpenPositions       []promptPosition         `json:"open_positions"`
+	Market              []promptMarket           `json:"market"`
+	CandidatePriority   []string                 `json:"candidate_priority,omitempty"`
+	RecentRiskAlerts    []RiskFlag               `json:"recent_risk_alerts,omitempty"`
+	RecentGuardrails    []MarketGuardrailWarning `json:"recent_guardrails,omitempty"`
+	AuxOpinions         []promptAuxOpinion       `json:"auxiliary_opinions,omitempty"`
+	AuxConsensus        *promptAuxConsensus      `json:"auxiliary_consensus,omitempty"`
+	EnsembleMeta        *promptEnsembleMeta      `json:"ensemble_meta,omitempty"`
+	PendingEntries      []PendingEntry           `json:"pending_entries,omitempty"`
+	UserNote            string                   `json:"user_note,omitempty"`
+	ConversationHistory []promptConversationTurn `json:"conversation_history,omitempty"`
+}
+
+type promptConversationTurn struct {
+	Role      string `json:"role"`
+	Content   string `json:"content"`
+	Timestamp string `json:"timestamp,omitempty"`
 }
 
 func buildPromptSnapshot(ctx *Context) promptSnapshot {
@@ -1012,7 +1029,7 @@ func buildPromptSnapshot(ctx *Context) promptSnapshot {
 		}
 	}
 
-	return promptSnapshot{
+	snapshot := promptSnapshot{
 		Runtime:           runtime,
 		Account:           account,
 		Risk:              risk,
@@ -1027,6 +1044,31 @@ func buildPromptSnapshot(ctx *Context) promptSnapshot {
 		EnsembleMeta:      ensembleMeta,
 		PendingEntries:    ctx.PendingEntries,
 	}
+
+	if strings.TrimSpace(ctx.UserNote) != "" {
+		snapshot.UserNote = ctx.UserNote
+	}
+
+	if len(ctx.ConversationHistory) > 0 {
+		conversation := make([]promptConversationTurn, 0, len(ctx.ConversationHistory))
+		for _, turn := range ctx.ConversationHistory {
+			role := strings.TrimSpace(turn.Role)
+			content := strings.TrimSpace(turn.Content)
+			if role == "" || content == "" {
+				continue
+			}
+			conversation = append(conversation, promptConversationTurn{
+				Role:      role,
+				Content:   content,
+				Timestamp: turn.Timestamp,
+			})
+		}
+		if len(conversation) > 0 {
+			snapshot.ConversationHistory = conversation
+		}
+	}
+
+	return snapshot
 }
 
 // buildUserPrompt 构建 User Prompt（动态数据）

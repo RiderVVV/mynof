@@ -15,6 +15,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+const conversationHistoryLimit = 8
+
 // Server HTTP API服务器
 type Server struct {
 	router        *gin.Engine
@@ -29,6 +31,7 @@ type consultationPayload struct {
 	SymbolsText string   `json:"symbols_text"`
 	Leverage    int      `json:"leverage"`
 	Balance     float64  `json:"balance"`
+	Note        string   `json:"note"`
 }
 
 type autoModePayload struct {
@@ -487,6 +490,9 @@ func (s *Server) handleGetConsultationSettings(c *gin.Context) {
 			latest := buildConsultationResultPayload(record.TraderID, record.Result)
 			latest["record_id"] = record.ID
 			latest["created_at"] = record.CreatedAt.Format(time.RFC3339)
+			if strings.TrimSpace(record.Note) != "" {
+				latest["note"] = record.Note
+			}
 			response["latest_result"] = latest
 		}
 	} else {
@@ -581,6 +587,8 @@ func (s *Server) handleConsultationRequest(c *gin.Context) {
 		return
 	}
 
+	note := strings.TrimSpace(payload.Note)
+
 	symbols := mergeConsultSymbols(payload.Symbols, payload.SymbolsText)
 	leverage := payload.Leverage
 	balance := payload.Balance
@@ -610,10 +618,19 @@ func (s *Server) handleConsultationRequest(c *gin.Context) {
 		balance = defaults.Balance
 	}
 
+	var convoHistory []trader.ConversationTurn
+	if historyRecords, err := s.consultStore.ListRecords(traderID, conversationHistoryLimit); err == nil {
+		convoHistory = buildConversationHistory(historyRecords)
+	} else {
+		log.Printf("⚠️  读取咨询对话历史失败: %v", err)
+	}
+
 	request := trader.ConsultationRequest{
 		Symbols:  symbols,
 		Leverage: leverage,
 		Balance:  balance,
+		Note:     note,
+		History:  convoHistory,
 	}
 
 	result, err := traderObj.GenerateConsultation(request)
@@ -628,7 +645,7 @@ func (s *Server) handleConsultationRequest(c *gin.Context) {
 		return
 	}
 
-	record, err := s.consultStore.AppendRecord(traderID, result)
+	record, err := s.consultStore.AppendRecord(traderID, result, note)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": fmt.Sprintf("保存咨询记录失败: %v", err),
@@ -640,6 +657,11 @@ func (s *Server) handleConsultationRequest(c *gin.Context) {
 	if record != nil {
 		response["record_id"] = record.ID
 		response["created_at"] = record.CreatedAt.Format(time.RFC3339)
+		if record.Note != "" {
+			response["note"] = record.Note
+		}
+	} else if note != "" {
+		response["note"] = note
 	}
 	c.JSON(http.StatusOK, response)
 }
@@ -685,6 +707,9 @@ func (s *Server) handleConsultationHistory(c *gin.Context) {
 		entry := buildConsultationResultPayload(record.TraderID, record.Result)
 		entry["record_id"] = record.ID
 		entry["created_at"] = record.CreatedAt.Format(time.RFC3339)
+		if strings.TrimSpace(record.Note) != "" {
+			entry["note"] = record.Note
+		}
 		history = append(history, entry)
 	}
 
@@ -716,6 +741,87 @@ func buildConsultationResultPayload(traderID string, result *trader.Consultation
 		"cot_trace": result.CoTTrace,
 		"prompt":    result.Prompt,
 	}
+}
+
+func buildConversationHistory(records []*consult.Record) []trader.ConversationTurn {
+	if len(records) == 0 {
+		return nil
+	}
+
+	turns := make([]trader.ConversationTurn, 0, len(records)*2)
+	// records are newest first, need oldest first for conversation
+	for i := len(records) - 1; i >= 0; i-- {
+		record := records[i]
+		if record == nil {
+			continue
+		}
+		if note := strings.TrimSpace(record.Note); note != "" {
+			turns = append(turns, trader.ConversationTurn{
+				Role:      "user",
+				Content:   note,
+				Timestamp: record.CreatedAt,
+			})
+		}
+		if summary := summarizeConsultationRecord(record); summary != "" {
+			turns = append(turns, trader.ConversationTurn{
+				Role:      "assistant",
+				Content:   summary,
+				Timestamp: record.CreatedAt,
+			})
+		}
+	}
+
+	if len(turns) == 0 {
+		return nil
+	}
+	return turns
+}
+
+func summarizeConsultationRecord(record *consult.Record) string {
+	if record == nil || record.Result == nil {
+		return ""
+	}
+	decisions := record.Result.Decisions
+	builder := strings.Builder{}
+	builder.WriteString(fmt.Sprintf("AI 建议（%s，杠杆 %dx，余额 %.0f USDT）:",
+		strings.Join(record.Symbols, ", "),
+		record.Leverage,
+		record.Balance,
+	))
+
+	if len(decisions) == 0 {
+		builder.WriteString(" 暂无操作。")
+		return builder.String()
+	}
+
+	limit := len(decisions)
+	if limit > 3 {
+		limit = 3
+	}
+	for i := 0; i < limit; i++ {
+		decision := decisions[i]
+		action := strings.ToUpper(decision.Action)
+		if action == "" {
+			action = "WAIT"
+		}
+		builder.WriteString(fmt.Sprintf("\n• %s %s", action, decision.Symbol))
+		if decision.Reasoning != "" {
+			builder.WriteString(fmt.Sprintf(" · %s", truncateText(decision.Reasoning, 160)))
+		}
+	}
+	if len(decisions) > limit {
+		builder.WriteString(fmt.Sprintf("\n（另有 %d 条建议）", len(decisions)-limit))
+	}
+	return builder.String()
+}
+
+func truncateText(input string, limit int) string {
+	text := strings.TrimSpace(input)
+	if limit <= 0 || len([]rune(text)) <= limit {
+		return text
+	}
+	runes := []rune(text)
+	return string(runes[:limit]) + "..."
 }
 
 func mergeConsultSymbols(list []string, raw string) []string {

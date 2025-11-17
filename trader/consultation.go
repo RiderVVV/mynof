@@ -31,9 +31,11 @@ type ConsultationDefaults struct {
 
 // ConsultationRequest contains the inputs coming from the consultation UI.
 type ConsultationRequest struct {
-	Symbols  []string `json:"symbols"`
-	Leverage int      `json:"leverage"`
-	Balance  float64  `json:"balance"`
+	Symbols  []string           `json:"symbols"`
+	Leverage int                `json:"leverage"`
+	Balance  float64            `json:"balance"`
+	Note     string             `json:"note"`
+	History  []ConversationTurn `json:"history"`
 }
 
 // ConsultationResult is a simplified view of the AI response.
@@ -45,6 +47,13 @@ type ConsultationResult struct {
 	Decisions []decision.Decision `json:"decisions"`
 	CoTTrace  string              `json:"cot_trace"`
 	Prompt    string              `json:"prompt"`
+}
+
+// ConversationTurn represents a single dialogue entry in consultation mode.
+type ConversationTurn struct {
+	Role      string
+	Content   string
+	Timestamp time.Time
 }
 
 // GetConsultationDefaults returns default inputs for consult-only mode.
@@ -118,12 +127,14 @@ func (at *AutoTrader) GenerateConsultation(req ConsultationRequest) (*Consultati
 			MarginUsedPct:    0,
 			PositionCount:    0,
 		},
-		Positions:        []decision.PositionInfo{},
-		CandidateCoins:   buildConsultCandidates(symbols),
-		BTCETHLeverage:   leverage,
-		AltcoinLeverage:  leverage,
-		SystemPromptPath: at.config.SystemPromptPath,
-		PendingEntries:   nil,
+		Positions:           []decision.PositionInfo{},
+		CandidateCoins:      buildConsultCandidates(symbols),
+		BTCETHLeverage:      leverage,
+		AltcoinLeverage:     leverage,
+		SystemPromptPath:    at.config.SystemPromptPath,
+		PendingEntries:      nil,
+		UserNote:            strings.TrimSpace(req.Note),
+		ConversationHistory: buildDecisionConversation(req.History),
 	}
 
 	fullDecision, err := decision.GetFullDecision(ctx, at.mcpClient)
@@ -181,6 +192,36 @@ func buildConsultCandidates(symbols []string) []decision.CandidateCoin {
 		})
 	}
 	return result
+}
+
+func buildDecisionConversation(history []ConversationTurn) []decision.ConversationTurn {
+	if len(history) == 0 {
+		return nil
+	}
+	turns := make([]decision.ConversationTurn, 0, len(history))
+	for _, turn := range history {
+		content := strings.TrimSpace(turn.Content)
+		if content == "" {
+			continue
+		}
+		role := strings.ToLower(strings.TrimSpace(turn.Role))
+		if role != "assistant" {
+			role = "user"
+		}
+		ts := ""
+		if !turn.Timestamp.IsZero() {
+			ts = turn.Timestamp.Format("2006-01-02 15:04:05")
+		}
+		turns = append(turns, decision.ConversationTurn{
+			Role:      role,
+			Content:   content,
+			Timestamp: ts,
+		})
+	}
+	if len(turns) == 0 {
+		return nil
+	}
+	return turns
 }
 
 func clamp(v, minVal, maxVal int) int {

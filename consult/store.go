@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"nofx/market"
@@ -38,6 +39,7 @@ type Record struct {
 	Leverage  int                        `json:"leverage"`
 	Balance   float64                    `json:"balance"`
 	Result    *trader.ConsultationResult `json:"result"`
+	Note      string                     `json:"note"`
 	CreatedAt time.Time                  `json:"created_at"`
 }
 
@@ -95,10 +97,18 @@ func initSchema(db *sql.DB) error {
 		leverage INTEGER NOT NULL DEFAULT 5,
 		balance REAL NOT NULL DEFAULT 0,
 		result_json TEXT NOT NULL,
+		user_note TEXT NOT NULL DEFAULT '',
 		created_at DATETIME NOT NULL
 	);`
 	if _, err := db.Exec(recordsDDL); err != nil {
 		return fmt.Errorf("初始化咨询模式历史表失败: %w", err)
+	}
+
+	const addNoteColumn = `ALTER TABLE consultation_records ADD COLUMN user_note TEXT NOT NULL DEFAULT ''`
+	if _, err := db.Exec(addNoteColumn); err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("升级咨询模式历史表失败: %w", err)
+		}
 	}
 
 	const indexDDL = `
@@ -186,7 +196,7 @@ func (s *Store) SavePreferences(p Preferences) (*Preferences, error) {
 }
 
 // AppendRecord 保存一次新的咨询结果。
-func (s *Store) AppendRecord(traderID string, result *trader.ConsultationResult) (*Record, error) {
+func (s *Store) AppendRecord(traderID string, result *trader.ConsultationResult, note string) (*Record, error) {
 	if traderID == "" {
 		return nil, fmt.Errorf("trader_id 不能为空")
 	}
@@ -210,10 +220,11 @@ func (s *Store) AppendRecord(traderID string, result *trader.ConsultationResult)
 	}
 
 	const stmt = `
-	INSERT INTO consultation_records (trader_id, symbols, leverage, balance, result_json, created_at)
-	VALUES (?, ?, ?, ?, ?, ?)
+	INSERT INTO consultation_records (trader_id, symbols, leverage, balance, result_json, user_note, created_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?)
 	`
-	res, err := s.db.Exec(stmt, traderID, string(symbolsJSON), result.Leverage, result.Balance, string(resultJSON), createdAt)
+	trimmedNote := strings.TrimSpace(note)
+	res, err := s.db.Exec(stmt, traderID, string(symbolsJSON), result.Leverage, result.Balance, string(resultJSON), trimmedNote, createdAt)
 	if err != nil {
 		return nil, fmt.Errorf("保存咨询记录失败: %w", err)
 	}
@@ -226,6 +237,7 @@ func (s *Store) AppendRecord(traderID string, result *trader.ConsultationResult)
 		Leverage:  result.Leverage,
 		Balance:   result.Balance,
 		Result:    cloneConsultationResult(result),
+		Note:      trimmedNote,
 		CreatedAt: createdAt,
 	}
 
@@ -257,7 +269,7 @@ func (s *Store) ListRecords(traderID string, limit int) ([]*Record, error) {
 	}
 
 	const queryTemplate = `
-	SELECT id, symbols, leverage, balance, result_json, created_at
+	SELECT id, symbols, leverage, balance, result_json, user_note, created_at
 	FROM consultation_records
 	WHERE trader_id = ?
 	ORDER BY created_at DESC, id DESC
@@ -278,14 +290,15 @@ func (s *Store) ListRecords(traderID string, limit int) ([]*Record, error) {
 			leverage   int
 			balance    float64
 			resultJSON string
+			noteText   string
 			createdAt  time.Time
 		)
 
-		if err := rows.Scan(&id, &rawSymbols, &leverage, &balance, &resultJSON, &createdAt); err != nil {
+		if err := rows.Scan(&id, &rawSymbols, &leverage, &balance, &resultJSON, &noteText, &createdAt); err != nil {
 			return nil, fmt.Errorf("解析咨询记录失败: %w", err)
 		}
 
-		record, err := buildRecord(traderID, id, rawSymbols, leverage, balance, resultJSON, createdAt)
+		record, err := buildRecord(traderID, id, rawSymbols, leverage, balance, resultJSON, noteText, createdAt)
 		if err != nil {
 			return nil, err
 		}
@@ -298,7 +311,7 @@ func (s *Store) ListRecords(traderID string, limit int) ([]*Record, error) {
 	return records, nil
 }
 
-func buildRecord(traderID string, id int64, rawSymbols string, leverage int, balance float64, resultJSON string, createdAt time.Time) (*Record, error) {
+func buildRecord(traderID string, id int64, rawSymbols string, leverage int, balance float64, resultJSON string, note string, createdAt time.Time) (*Record, error) {
 	var symbols []string
 	if err := json.Unmarshal([]byte(rawSymbols), &symbols); err != nil {
 		symbols = nil
@@ -319,6 +332,7 @@ func buildRecord(traderID string, id int64, rawSymbols string, leverage int, bal
 		Leverage:  leverage,
 		Balance:   balance,
 		Result:    cloneConsultationResult(&result),
+		Note:      strings.TrimSpace(note),
 		CreatedAt: createdAt,
 	}, nil
 }

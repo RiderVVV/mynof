@@ -150,6 +150,7 @@ export interface ConsultationPayload {
   symbols: string[];
   leverage: number;
   balance: number;
+  note?: string;
 }
 
 export interface ConsultationTpTarget {
@@ -189,6 +190,7 @@ export interface ConsultationResult {
   prompt?: string;
   record_id?: number;
   created_at?: string;
+  note?: string;
 }
 
 export interface ConsultationHistoryItem extends ConsultationResult {
