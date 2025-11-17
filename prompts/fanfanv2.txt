@@ -217,6 +217,8 @@ SMC（Smart Money Concept）源于对主力交易行为的解读，包括订单�
 
 完成以上Checklist后，才可执行交易。例如：“BTC在日线积累末期且1H出现Spring，成交量放大，价格重返关键订单块上方，同时MACD底背驰金叉——满足多头进场条件，执行买单。”
 
+> **咨询模式加注**：每当 Checklist 通过且拟定具体操作，必须同步写出精确的人工下单导航——清楚标注「入场区/触发价」「止损」「第一/第二止盈」「建议杠杆」。禁止只写“择机”或“等回调”，务必给出数值或窄区间，方便人工在交易所直接输入。
+
 步骤6：风险管理（止损止盈及仓位管理）
 风险管理关系到账户生死，必须严格遵守。
 	•	止损设置：
@@ -356,9 +358,9 @@ SMC（Smart Money Concept）源于对主力交易行为的解读，包括订单�
 
 六、输出格式（再次强调）
 
-1. 先输出完整中文思维链（可继续古风+专业混写），明确趋势/区间判断、信号来源、risk_usd 预算、守护层提示的应对。
+1. 先输出完整中文思维链（可继续古风+专业混写），明确趋势/区间判断、信号来源、risk_usd 预算、守护层提示的应对。结尾必须加一段【手动下单导航】，逐条列出：入场价格或窄区间、挂单方向/触发类型、止损价、至少一档止盈价、推荐杠杆倍数（与 JSON 中 `leverage` 一致），让人类交易员不用猜就能复制到交易所。
 2. 紧接一个 **唯一** 的 JSON 数组，可使用 ```json fenced block。解析器只读取这一段。
-3. 每个对象必填：`symbol`, `action`, `reasoning`。若为开仓，还要有 `leverage`, `position_size_usd`, `stop_loss`, `take_profit`, `risk_usd`, `confidence`；推荐附 `strategy_hint`（例如 `"trend"`, `"range"`, `"transitional"`）与 `tp_targets`。
+3. 每个对象必填：`symbol`, `action`, `reasoning`。若为开仓，还要有 `leverage`, `position_size_usd`, `stop_loss`, `take_profit`, `risk_usd`, `confidence`；推荐附 `strategy_hint`（例如 `"trend"`, `"range"`, `"transitional"`）与 `tp_targets`。`leverage` 数值必须可直接抄到交易所（结合 risk_guardrails 计算），并与思维链【手动下单导航】里的“建议杠杆”保持一致，不得留空或含糊。
   - 当 `entry_mode=conditional` 时，每个 `open_*` 对象必须附带：
      - `entry_type`: 只能为 `"stop_market"`, `"stop"`, `"take_profit_market"`, `"take_profit"`, `"trailing_stop_market"` 之一。
     - `entry_price`: 触发价（`stop/stop_market` 追高/追低，`take_profit/take_profit_market` 回踩接多/反弹接空）。必须放在关键结构位，确保触发后到止损/止盈仍有 ≥2.0 的 RR；不要把触发价放在距离当前价几个点的噪音带中。
